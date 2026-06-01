@@ -9361,34 +9361,36 @@ function doubleEndTurn() {
 
 // ダブルモード：ステータスバー更新
 function renderDoubleStatus() {
-  const mem = GD.memory; // 正=赤側、大きいほど赤が有利
-  const memEl = document.getElementById('double-memory');
-  if (memEl) {
-    memEl.textContent = Math.abs(mem);
-  }
-  // メモリーバー（中央0、左赤・右青）
-  const bar = document.getElementById('double-memory-bar');
-  if (bar) {
-    const maxMem = 10;
-    const pct = Math.min(Math.abs(mem) / maxMem, 1);
-    if (mem >= 0) {
-      // 赤側（左）
-      bar.style.left = `${(0.5 - pct * 0.5) * 100}%`;
-      bar.style.width = `${pct * 50}%`;
-      bar.style.background = 'var(--accent-red)';
-    } else {
-      // 青側（右）
-      bar.style.left = '50%';
-      bar.style.width = `${pct * 50}%`;
-      bar.style.background = 'var(--accent-blue)';
+  const mem = GD.memory;
+
+  // メモリーゲージ（⑩赤〜⓪〜⑩青の数字並び、現在値を光らせる）
+  const track = document.getElementById('double-memory-track');
+  if (track) {
+    track.innerHTML = '';
+    // 赤側：10〜1、真ん中：0、青側：1〜10
+    const cells = [];
+    for (let i = 10; i >= 1; i--) cells.push({ val: i, side: 'red' });
+    cells.push({ val: 0, side: 'zero' });
+    for (let i = 1; i <= 10; i++) cells.push({ val: i, side: 'blue' });
+
+    const absM = Math.abs(mem);
+    for (const cell of cells) {
+      const div = document.createElement('div');
+      div.className = 'd-mem-cell' + (cell.val === 0 ? ' d-mem-zero' : '');
+      div.textContent = cell.val;
+      // 現在値を光らせる
+      if (mem > 0 && cell.side === 'red' && cell.val === absM) div.classList.add('active-red');
+      else if (mem < 0 && cell.side === 'blue' && cell.val === absM) div.classList.add('active-blue');
+      else if (mem === 0 && cell.side === 'zero') div.classList.add(GD.activePlayer === 'left' ? 'active-red' : 'active-blue');
+      track.appendChild(div);
     }
   }
+
+  // ターンラベル
   const turnEl = document.getElementById('double-turn-label');
-  if (turnEl) {
-    const label = GD.activePlayer === 'left' ? '🔴 赤のターン' : '🔵 青のターン';
-    turnEl.textContent = `T${GD.turn}  ${label}`;
-  }
-  // パネルサイズ・強調
+  if (turnEl) turnEl.textContent = `T${GD.turn} ${GD.activePlayer === 'left' ? '🔴 赤' : '🔵 青'}のターン`;
+
+  // パネルサイズ
   const lp = document.getElementById('double-panel-left');
   const rp = document.getElementById('double-panel-right');
   const dv = document.getElementById('double-divider');
@@ -9396,11 +9398,11 @@ function renderDoubleStatus() {
     if (GD.activePlayer === 'left') {
       lp.style.flex = '3'; rp.style.flex = '1';
       lp.classList.add('is-active'); rp.classList.remove('is-active');
-      if (dv) dv.style.background = 'linear-gradient(180deg, rgba(224,80,80,0.5), rgba(64,128,224,0.15))';
+      if (dv) dv.style.background = 'linear-gradient(180deg,rgba(224,80,80,0.6),rgba(64,128,224,0.2))';
     } else {
       lp.style.flex = '1'; rp.style.flex = '3';
       rp.classList.add('is-active'); lp.classList.remove('is-active');
-      if (dv) dv.style.background = 'linear-gradient(180deg, rgba(224,80,80,0.15), rgba(64,128,224,0.5))';
+      if (dv) dv.style.background = 'linear-gradient(180deg,rgba(224,80,80,0.2),rgba(64,128,224,0.6))';
     }
   }
 }
@@ -9614,21 +9616,16 @@ window.onload = function() {
 <!-- ダブルモード：ゲーム画面 -->
 <div id="double-app" style="display:none; width:100vw; height:100vh; flex-direction:column; overflow:hidden; background:var(--bg-dark);">
 
-  <!-- ヘッダー：ターン情報・メモリーゲージ・ターン終了 -->
+  <!-- ヘッダー -->
   <div class="d-header">
-    <div style="display:flex;align-items:center;gap:8px;min-width:80px;">
+    <div style="display:flex;align-items:center;gap:8px;min-width:100px;">
       <span id="double-turn-label" style="font-size:10px;font-weight:700;color:var(--text-bright);white-space:nowrap;"></span>
     </div>
-    <!-- メモリーゲージ（中央） -->
+    <!-- メモリーゲージ -->
     <div class="d-memory-wrap">
-      <span style="font-size:10px;color:var(--accent-red);font-weight:700;">🔴</span>
-      <div class="d-memory-gauge">
-        <div class="d-memory-bar" id="double-memory-bar"></div>
-        <span class="d-memory-num" id="double-memory">3</span>
-      </div>
-      <span style="font-size:10px;color:var(--accent-blue);font-weight:700;">🔵</span>
+      <div class="d-memory-track" id="double-memory-track"></div>
     </div>
-    <div style="display:flex;gap:4px;min-width:80px;justify-content:flex-end;">
+    <div style="min-width:100px;display:flex;justify-content:flex-end;">
       <button class="d-btn d-btn-end" onclick="doubleEndTurn()">終了</button>
     </div>
   </div>
@@ -9638,224 +9635,237 @@ window.onload = function() {
 
     <!-- 左（赤）盤面 -->
     <div id="double-panel-left" class="d-panel d-panel-red">
-
-      <!-- プレイヤーラベル -->
-      <div class="d-player-label d-player-label-red">
-        🔴 赤
-      </div>
-
-      <!-- セキュリティエリア -->
-      <div class="d-section">
-        <div class="d-area-label">SECURITY</div>
-        <div id="double-left-security-area" class="d-security-area"></div>
-      </div>
-
-      <!-- バトルエリア -->
-      <div class="d-section d-battle-section">
-        <div class="d-area-label">BATTLE</div>
-        <div id="double-left-battle" class="d-battle-area"></div>
-      </div>
-
-      <!-- 下段：デジタマ・育成・デッキ・トラッシュ -->
-      <div class="d-bottom-row">
-        <div class="d-small-box" onclick="G_isDoubleMode&&GD.activePlayer==='left'&&hatchTamago()">
-          <span class="d-box-icon">🥚</span>
-          <span class="d-box-count" id="double-left-tamago">5</span>
-          <span class="d-box-label">タマゴ</span>
+      <div class="d-player-label d-player-label-red">🔴 赤</div>
+      <!-- メインエリア：左列・バトル・右列 -->
+      <div class="d-main-area">
+        <!-- 左列：セキュリティ・デジタマ・育成 -->
+        <div class="d-left-col">
+          <div class="d-area-label">SEC</div>
+          <div id="double-left-security-area" class="d-security-area"></div>
+          <div style="margin-top:6px;">
+            <div class="d-small-box">
+              <span class="d-box-icon">🥚</span>
+              <span class="d-box-count" id="double-left-tamago">5</span>
+              <span class="d-box-label">タマゴ</span>
+            </div>
+          </div>
+          <div style="margin-top:4px;">
+            <div class="d-small-box" id="double-left-breed-box">
+              <span class="d-box-icon">🌱</span>
+              <span class="d-box-count" id="double-left-breed-name">空</span>
+              <span class="d-box-label">育成</span>
+            </div>
+          </div>
         </div>
-        <div class="d-small-box" id="double-left-breed-box">
-          <span class="d-box-icon">🌱</span>
-          <span class="d-box-count" id="double-left-breed-name">空</span>
-          <span class="d-box-label">育成</span>
+        <!-- バトルエリア -->
+        <div class="d-battle-section">
+          <div class="d-area-label">BATTLE</div>
+          <div id="double-left-battle" class="d-battle-area"></div>
         </div>
-        <div class="d-small-box">
-          <span class="d-box-icon">🂠</span>
-          <span class="d-box-count" id="double-left-deck">50</span>
-          <span class="d-box-label">デッキ</span>
-        </div>
-        <div class="d-small-box">
-          <span class="d-box-icon">♻</span>
-          <span class="d-box-count" id="double-left-trash">0</span>
-          <span class="d-box-label">トラッシュ</span>
+        <!-- 右列：デッキ・トラッシュ -->
+        <div class="d-right-col">
+          <div class="d-small-box">
+            <span class="d-box-icon">🂠</span>
+            <span class="d-box-count" id="double-left-deck">50</span>
+            <span class="d-box-label">デッキ</span>
+          </div>
+          <div style="margin-top:4px;">
+            <div class="d-small-box">
+              <span class="d-box-icon">♻</span>
+              <span class="d-box-count" id="double-left-trash">0</span>
+              <span class="d-box-label">トラッシュ</span>
+            </div>
+          </div>
         </div>
       </div>
-
       <!-- 手札 -->
       <div class="d-hand-wrap d-hand-wrap-red">
         <div class="d-area-label">HAND</div>
         <div id="double-left-hand" class="d-hand-area"></div>
       </div>
-
-    </div><!-- /left -->
+    </div>
 
     <!-- 中央分割線 -->
     <div class="d-divider" id="double-divider"></div>
 
     <!-- 右（青）盤面 -->
     <div id="double-panel-right" class="d-panel d-panel-blue">
-
-      <!-- プレイヤーラベル -->
-      <div class="d-player-label d-player-label-blue">
-        🔵 青
-      </div>
-
-      <!-- セキュリティエリア -->
-      <div class="d-section">
-        <div class="d-area-label">SECURITY</div>
-        <div id="double-right-security-area" class="d-security-area"></div>
-      </div>
-
-      <!-- バトルエリア -->
-      <div class="d-section d-battle-section">
-        <div class="d-area-label">BATTLE</div>
-        <div id="double-right-battle" class="d-battle-area"></div>
-      </div>
-
-      <!-- 下段：デジタマ・育成・デッキ・トラッシュ -->
-      <div class="d-bottom-row">
-        <div class="d-small-box">
-          <span class="d-box-icon">🥚</span>
-          <span class="d-box-count" id="double-right-tamago">5</span>
-          <span class="d-box-label">タマゴ</span>
+      <div class="d-player-label d-player-label-blue">🔵 青</div>
+      <!-- メインエリア：左列・バトル・右列 -->
+      <div class="d-main-area">
+        <!-- 左列：セキュリティ・デジタマ・育成 -->
+        <div class="d-left-col">
+          <div class="d-area-label">SEC</div>
+          <div id="double-right-security-area" class="d-security-area"></div>
+          <div style="margin-top:6px;">
+            <div class="d-small-box">
+              <span class="d-box-icon">🥚</span>
+              <span class="d-box-count" id="double-right-tamago">5</span>
+              <span class="d-box-label">タマゴ</span>
+            </div>
+          </div>
+          <div style="margin-top:4px;">
+            <div class="d-small-box" id="double-right-breed-box">
+              <span class="d-box-icon">🌱</span>
+              <span class="d-box-count" id="double-right-breed-name">空</span>
+              <span class="d-box-label">育成</span>
+            </div>
+          </div>
         </div>
-        <div class="d-small-box" id="double-right-breed-box">
-          <span class="d-box-icon">🌱</span>
-          <span class="d-box-count" id="double-right-breed-name">空</span>
-          <span class="d-box-label">育成</span>
+        <!-- バトルエリア -->
+        <div class="d-battle-section">
+          <div class="d-area-label">BATTLE</div>
+          <div id="double-right-battle" class="d-battle-area"></div>
         </div>
-        <div class="d-small-box">
-          <span class="d-box-icon">🂠</span>
-          <span class="d-box-count" id="double-right-deck">50</span>
-          <span class="d-box-label">デッキ</span>
-        </div>
-        <div class="d-small-box">
-          <span class="d-box-icon">♻</span>
-          <span class="d-box-count" id="double-right-trash">0</span>
-          <span class="d-box-label">トラッシュ</span>
+        <!-- 右列：デッキ・トラッシュ -->
+        <div class="d-right-col">
+          <div class="d-small-box">
+            <span class="d-box-icon">🂠</span>
+            <span class="d-box-count" id="double-right-deck">50</span>
+            <span class="d-box-label">デッキ</span>
+          </div>
+          <div style="margin-top:4px;">
+            <div class="d-small-box">
+              <span class="d-box-icon">♻</span>
+              <span class="d-box-count" id="double-right-trash">0</span>
+              <span class="d-box-label">トラッシュ</span>
+            </div>
+          </div>
         </div>
       </div>
-
       <!-- 手札 -->
       <div class="d-hand-wrap d-hand-wrap-blue">
         <div class="d-area-label">HAND</div>
         <div id="double-right-hand" class="d-hand-area"></div>
       </div>
+    </div>
 
-    </div><!-- /right -->
-
-  </div><!-- /左右盤面 -->
-</div><!-- /double-app -->
+  </div>
+</div>
 
 
 <style>
 /* ダブルモード共通スタイル */
 
-/* ヘッダー */
 .d-header {
   display:flex; align-items:center; justify-content:space-between;
   padding:3px 10px; background:var(--bg-panel);
   border-bottom:1px solid rgba(255,255,255,0.06);
-  flex-shrink:0; height:38px; gap:6px;
+  flex-shrink:0; height:40px; gap:6px;
 }
 
-/* メモリーゲージ */
-.d-memory-wrap {
-  display:flex; align-items:center; gap:5px; flex:1; justify-content:center;
+/* メモリーゲージ：数字並び */
+.d-memory-wrap { display:flex; align-items:center; justify-content:center; flex:1; }
+.d-memory-track {
+  display:flex; align-items:center; gap:2px;
 }
-.d-memory-gauge {
-  position:relative; width:140px; height:20px;
-  background:var(--bg-card); border-radius:10px;
-  border:1px solid rgba(255,255,255,0.1); overflow:hidden;
+.d-mem-cell {
+  width:22px; height:22px; border-radius:50%;
+  display:flex; align-items:center; justify-content:center;
+  font-size:9px; font-weight:700;
+  background:var(--bg-card); color:var(--text-dim);
+  border:1px solid rgba(255,255,255,0.08);
+  transition:background 0.2s, color 0.2s, box-shadow 0.2s;
+  flex-shrink:0;
 }
-.d-memory-bar {
-  position:absolute; top:0; height:100%;
-  transition:left 0.3s, width 0.3s, background 0.3s;
-  border-radius:10px; opacity:0.75;
+.d-mem-cell.active-red {
+  background:var(--accent-red); color:#fff;
+  box-shadow:0 0 8px rgba(224,80,80,0.8);
+  border-color:var(--accent-red);
 }
-.d-memory-num {
-  position:absolute; top:50%; left:50%;
-  transform:translate(-50%,-50%);
-  font-size:12px; font-weight:900; color:var(--text-bright);
-  text-shadow:0 0 6px rgba(0,0,0,0.9);
-  pointer-events:none;
+.d-mem-cell.active-blue {
+  background:var(--accent-blue); color:#fff;
+  box-shadow:0 0 8px rgba(64,128,224,0.8);
+  border-color:var(--accent-blue);
+}
+.d-mem-zero {
+  font-size:10px; font-weight:900;
+  width:26px; height:26px;
 }
 
-/* ボタン */
-.d-btn { padding:3px 10px; border:none; border-radius:5px; color:#fff; font-size:10px; font-weight:700; cursor:pointer; font-family:var(--font-main); }
+.d-btn { padding:3px 12px; border:none; border-radius:5px; color:#fff; font-size:11px; font-weight:700; cursor:pointer; font-family:var(--font-main); }
 .d-btn-end { background:var(--accent-red); }
 
-/* 盤面パネル */
+/* パネル */
 .d-panel {
   display:flex; flex-direction:column; overflow:hidden;
   transition:flex 0.35s cubic-bezier(0.4,0,0.2,1);
 }
 .d-panel-red  { flex:3; }
 .d-panel-blue { flex:1; }
+.d-panel.is-active { background:rgba(255,255,255,0.008); }
 
-/* プレイヤーラベル */
 .d-player-label {
-  font-size:10px; font-weight:700; padding:2px 8px;
-  flex-shrink:0; letter-spacing:1px;
+  font-size:10px; font-weight:700; padding:2px 8px; flex-shrink:0; letter-spacing:1px;
 }
 .d-player-label-red  { background:rgba(224,80,80,0.1); color:var(--accent-red); border-bottom:1px solid rgba(224,80,80,0.15); }
 .d-player-label-blue { background:rgba(64,128,224,0.1); color:var(--accent-blue); border-bottom:1px solid rgba(64,128,224,0.15); }
 
-/* 中央分割線 */
 .d-divider {
   width:2px; flex-shrink:0;
-  background:linear-gradient(180deg, rgba(224,80,80,0.4), rgba(64,128,224,0.4));
-  transition:background 0.3s;
+  background:linear-gradient(180deg,rgba(224,80,80,0.4),rgba(64,128,224,0.4));
 }
 
-/* セクション共通 */
-.d-section { padding:4px 6px; flex-shrink:0; }
-.d-battle-section { flex:1; overflow-y:auto; }
-.d-area-label { font-size:7px; letter-spacing:2px; color:var(--text-dim); margin-bottom:3px; text-transform:uppercase; }
+/* メインエリア（左列・バトル・右列） */
+.d-main-area {
+  display:flex; flex:1; overflow:hidden; padding:4px 0;
+}
 
-/* セキュリティエリア */
-.d-security-area { display:flex; flex-wrap:wrap; gap:3px; min-height:28px; }
+/* 左列：セキュリティ・デジタマ・育成 */
+.d-left-col {
+  width:52px; flex-shrink:0;
+  display:flex; flex-direction:column;
+  padding:0 4px; overflow:hidden;
+}
+
+/* セキュリティ縦並び */
+.d-security-area { display:flex; flex-direction:column; gap:2px; }
 .d-security-card {
-  width:20px; height:28px; background:var(--bg-card);
-  border:1px solid rgba(255,255,255,0.15); border-radius:3px;
-  display:flex; align-items:center; justify-content:center;
-  font-size:10px;
+  width:36px; height:26px;
+  background:var(--bg-card); border:1px solid rgba(255,255,255,0.15);
+  border-radius:3px; display:flex; align-items:center; justify-content:center;
+  font-size:12px;
 }
 
 /* バトルエリア */
-.d-battle-area { display:flex; flex-wrap:wrap; gap:5px; min-height:50px; }
+.d-battle-section { flex:1; overflow-y:auto; padding:0 4px; }
+.d-area-label { font-size:7px; letter-spacing:2px; color:var(--text-dim); margin-bottom:3px; text-transform:uppercase; }
+.d-battle-area { display:flex; flex-wrap:wrap; gap:4px; min-height:40px; }
 
-/* 下段ボックス列 */
-.d-bottom-row {
-  display:flex; gap:4px; padding:4px 6px;
-  flex-shrink:0; border-top:1px solid rgba(255,255,255,0.05);
+/* 右列：デッキ・トラッシュ */
+.d-right-col {
+  width:52px; flex-shrink:0;
+  display:flex; flex-direction:column;
+  padding:0 4px; overflow:hidden;
 }
+
+/* 小ボックス（デジタマ・育成・デッキ・トラッシュ） */
 .d-small-box {
-  flex:1; background:var(--bg-card); border-radius:5px;
-  border:1px solid rgba(255,255,255,0.08);
+  width:44px; background:var(--bg-card);
+  border:1px solid rgba(255,255,255,0.08); border-radius:5px;
   display:flex; flex-direction:column; align-items:center;
   justify-content:center; padding:3px 2px; cursor:pointer;
   transition:border-color 0.15s;
-  min-width:0;
 }
 .d-small-box:hover { border-color:rgba(255,255,255,0.25); }
-.d-box-icon  { font-size:14px; line-height:1; }
+.d-box-icon  { font-size:13px; line-height:1; }
 .d-box-count { font-size:10px; font-weight:700; color:var(--text-bright); }
-.d-box-label { font-size:7px; color:var(--text-dim); letter-spacing:0.5px; }
+.d-box-label { font-size:6px; color:var(--text-dim); letter-spacing:0.3px; }
 
-/* 手札エリア */
+/* 手札 */
 .d-hand-wrap {
   flex-shrink:0; padding:4px 6px;
   border-top:1px solid rgba(255,255,255,0.06);
-  background:rgba(0,0,0,0.15); max-height:95px; overflow-y:auto;
+  background:rgba(0,0,0,0.15); max-height:90px; overflow-y:auto;
 }
 .d-hand-wrap-red  { border-top-color:rgba(224,80,80,0.12); }
 .d-hand-wrap-blue { border-top-color:rgba(64,128,224,0.12); }
 .d-hand-area { display:flex; flex-wrap:wrap; gap:3px; margin-top:3px; }
 
-/* デジモンカード（バトルエリア） */
+/* デジモンカード */
 .double-digimon-card {
   background:var(--bg-card); border:1px solid rgba(255,255,255,0.1);
-  border-radius:6px; padding:5px 7px; min-width:65px; max-width:110px;
+  border-radius:6px; padding:5px 7px; min-width:62px; max-width:105px;
   transition:transform 0.15s, border-color 0.2s; user-select:none;
 }
 .double-digimon-card.active-card { cursor:pointer; }
@@ -9868,7 +9878,7 @@ window.onload = function() {
 /* 手札カード */
 .double-hand-card {
   background:var(--bg-card); border:1px solid rgba(255,255,255,0.08);
-  border-radius:5px; padding:3px 6px; min-width:55px; max-width:95px;
+  border-radius:5px; padding:3px 6px; min-width:55px; max-width:90px;
   transition:border-color 0.15s, transform 0.1s; user-select:none;
 }
 .double-hand-card.active-card { cursor:pointer; }
@@ -9876,12 +9886,8 @@ window.onload = function() {
 .hcard-name { font-size:8px; font-weight:700; color:var(--text-bright); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .hcard-cost { font-size:7px; }
 
-/* アクティブパネル強調 */
-.d-panel.is-active { background:rgba(255,255,255,0.008); }
-
 /* 縦向き警告 */
 @media (max-width:768px) and (orientation:portrait) {
-  #double-app { position:relative; }
   #double-app::after {
     content:'📱 横向きにしてください';
     position:fixed; inset:0; background:var(--bg-dark);
