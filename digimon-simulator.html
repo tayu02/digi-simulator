@@ -9422,20 +9422,44 @@ function renderDoubleSide(side, state) {
   const isActive = GD.activePlayer === side;
   const color = side === 'left' ? 'var(--accent-red)' : 'var(--accent-blue)';
 
-  // セキュリティ・デッキ・トラッシュ枚数
-  const secEl = document.getElementById(`${prefix}-security`);
-  if (secEl) secEl.textContent = `🛡 ${(state.mySecurity||[]).length}`;
-  const deckEl = document.getElementById(`${prefix}-deck`);
-  if (deckEl) deckEl.textContent = `📦 ${(state.myDeck||[]).length}`;
-  const trashEl = document.getElementById(`${prefix}-trash`);
-  if (trashEl) trashEl.textContent = `🗑 ${(state.myTrash||[]).length}`;
-  const breedEl = document.getElementById(`${prefix}-breed`);
-  if (breedEl) {
+  // セキュリティエリア（カード裏向き表示）
+  const secArea = document.getElementById(`${prefix}-security-area`);
+  if (secArea) {
+    secArea.innerHTML = '';
+    const secLen = (state.mySecurity||[]).length;
+    for (let i = 0; i < secLen; i++) {
+      const div = document.createElement('div');
+      div.className = 'd-security-card';
+      div.textContent = '🂠';
+      secArea.appendChild(div);
+    }
+    if (secLen === 0) secArea.innerHTML = '<span style="font-size:9px;color:var(--accent-red);">0枚</span>';
+  }
+
+  // デジタマ枚数
+  const tamagoEl = document.getElementById(`${prefix}-tamago`);
+  if (tamagoEl) tamagoEl.textContent = (state.myTamagoDeck||[]).length;
+
+  // 育成エリア
+  const breedName = document.getElementById(`${prefix}-breed-name`);
+  if (breedName) {
     if (state.myBreeding) {
       const c = getCard(state.myBreeding.cardId);
-      breedEl.textContent = `🥚 ${c?.name||'?'}`;
-    } else { breedEl.textContent = '🥚 空'; }
+      breedName.textContent = (c?.name||'?').slice(0,6);
+      breedName.style.color = color;
+    } else {
+      breedName.textContent = '空';
+      breedName.style.color = 'var(--text-dim)';
+    }
   }
+
+  // デッキ枚数
+  const deckEl = document.getElementById(`${prefix}-deck`);
+  if (deckEl) deckEl.textContent = (state.myDeck||[]).length;
+
+  // トラッシュ枚数
+  const trashEl = document.getElementById(`${prefix}-trash`);
+  if (trashEl) trashEl.textContent = (state.myTrash||[]).length;
 
   // バトルエリア
   const battleEl = document.getElementById(`${prefix}-battle`);
@@ -9445,15 +9469,11 @@ function renderDoubleSide(side, state) {
       const c = getCard(inst.cardId);
       const dp = getDP(inst);
       const div = document.createElement('div');
-      div.className = `double-digimon-card${inst.isRested?' rested':''}`;
+      div.className = `double-digimon-card${inst.isRested?' rested':''}${isActive?' active-card':''}`;
       div.innerHTML = `<div class="dcard-name">${c?.name||'?'}</div>
         <div class="dcard-dp" style="color:${color}">DP ${dp.toLocaleString()}</div>
         <div class="dcard-lv">Lv.${c?.level||'?'} / ${(inst.stack||[]).length}枚</div>`;
-      // アクティブ側のみクリックで操作モーダル
-      if (isActive) {
-        div.style.cursor = 'pointer';
-        div.onclick = () => openDoubleBattleCardModal(inst, state);
-      }
+      if (isActive) div.onclick = () => openDoubleBattleCardModal(inst, state);
       battleEl.appendChild(div);
     }
   }
@@ -9466,14 +9486,10 @@ function renderDoubleSide(side, state) {
       const cId = state.myHand[i];
       const c = getCard(cId);
       const div = document.createElement('div');
-      div.className = 'double-hand-card';
+      div.className = `double-hand-card${isActive?' active-card':''}`;
       div.innerHTML = `<div class="hcard-name">${c?.name||'?'}</div>
         <div class="hcard-cost" style="color:${color}">コスト${c?.cost??'?'}</div>`;
-      // アクティブ側のみクリックで操作モーダル
-      if (isActive) {
-        div.style.cursor = 'pointer';
-        div.onclick = () => openDoubleHandCardModal(cId, i, state);
-      }
+      if (isActive) div.onclick = () => openDoubleHandCardModal(cId, i, state);
       handEl.appendChild(div);
     }
   }
@@ -9598,23 +9614,22 @@ window.onload = function() {
 <!-- ダブルモード：ゲーム画面 -->
 <div id="double-app" style="display:none; width:100vw; height:100vh; flex-direction:column; overflow:hidden; background:var(--bg-dark);">
 
-  <!-- ヘッダー -->
+  <!-- ヘッダー：ターン情報・メモリーゲージ・ターン終了 -->
   <div class="d-header">
-    <div style="display:flex;align-items:center;gap:10px;">
-      <a href="index.html" style="font-size:10px;color:var(--text-dim);text-decoration:none;">← TOP</a>
-      <span id="double-turn-label" style="font-size:12px;font-weight:700;color:var(--text-bright);"></span>
+    <div style="display:flex;align-items:center;gap:8px;min-width:80px;">
+      <span id="double-turn-label" style="font-size:10px;font-weight:700;color:var(--text-bright);white-space:nowrap;"></span>
     </div>
-    <!-- メモリーゲージ -->
+    <!-- メモリーゲージ（中央） -->
     <div class="d-memory-wrap">
-      <span class="d-memory-label">🔴</span>
-      <div class="d-memory-gauge" id="double-memory-gauge">
+      <span style="font-size:10px;color:var(--accent-red);font-weight:700;">🔴</span>
+      <div class="d-memory-gauge">
         <div class="d-memory-bar" id="double-memory-bar"></div>
-        <span class="d-memory-num" id="double-memory">0</span>
+        <span class="d-memory-num" id="double-memory">3</span>
       </div>
-      <span class="d-memory-label">🔵</span>
+      <span style="font-size:10px;color:var(--accent-blue);font-weight:700;">🔵</span>
     </div>
-    <div style="display:flex;gap:6px;">
-      <button class="d-btn d-btn-blue" onclick="doubleEndTurn()">ターン終了</button>
+    <div style="display:flex;gap:4px;min-width:80px;justify-content:flex-end;">
+      <button class="d-btn d-btn-end" onclick="doubleEndTurn()">終了</button>
     </div>
   </div>
 
@@ -9623,57 +9638,113 @@ window.onload = function() {
 
     <!-- 左（赤）盤面 -->
     <div id="double-panel-left" class="d-panel d-panel-red">
-      <!-- パネルヘッダー -->
-      <div class="d-panel-header d-panel-header-red">
-        <span style="font-weight:700;color:var(--accent-red);">🔴 赤</span>
-        <div class="d-panel-info">
-          <span id="double-left-security" class="d-info-badge">🛡 0</span>
-          <span id="double-left-deck" class="d-info-badge">📦 0</span>
-          <span id="double-left-trash" class="d-info-badge">🗑 0</span>
-          <span id="double-left-breed" class="d-info-badge">🥚 空</span>
-        </div>
+
+      <!-- プレイヤーラベル -->
+      <div class="d-player-label d-player-label-red">
+        🔴 赤
       </div>
+
+      <!-- セキュリティエリア -->
+      <div class="d-section">
+        <div class="d-area-label">SECURITY</div>
+        <div id="double-left-security-area" class="d-security-area"></div>
+      </div>
+
       <!-- バトルエリア -->
-      <div class="d-battle-wrap">
-        <div class="d-area-label">BATTLE AREA</div>
+      <div class="d-section d-battle-section">
+        <div class="d-area-label">BATTLE</div>
         <div id="double-left-battle" class="d-battle-area"></div>
       </div>
+
+      <!-- 下段：デジタマ・育成・デッキ・トラッシュ -->
+      <div class="d-bottom-row">
+        <div class="d-small-box" onclick="G_isDoubleMode&&GD.activePlayer==='left'&&hatchTamago()">
+          <span class="d-box-icon">🥚</span>
+          <span class="d-box-count" id="double-left-tamago">5</span>
+          <span class="d-box-label">タマゴ</span>
+        </div>
+        <div class="d-small-box" id="double-left-breed-box">
+          <span class="d-box-icon">🌱</span>
+          <span class="d-box-count" id="double-left-breed-name">空</span>
+          <span class="d-box-label">育成</span>
+        </div>
+        <div class="d-small-box">
+          <span class="d-box-icon">🂠</span>
+          <span class="d-box-count" id="double-left-deck">50</span>
+          <span class="d-box-label">デッキ</span>
+        </div>
+        <div class="d-small-box">
+          <span class="d-box-icon">♻</span>
+          <span class="d-box-count" id="double-left-trash">0</span>
+          <span class="d-box-label">トラッシュ</span>
+        </div>
+      </div>
+
       <!-- 手札 -->
       <div class="d-hand-wrap d-hand-wrap-red">
         <div class="d-area-label">HAND</div>
         <div id="double-left-hand" class="d-hand-area"></div>
       </div>
-    </div>
 
-    <!-- 中央の分割線 -->
+    </div><!-- /left -->
+
+    <!-- 中央分割線 -->
     <div class="d-divider" id="double-divider"></div>
 
     <!-- 右（青）盤面 -->
     <div id="double-panel-right" class="d-panel d-panel-blue">
-      <!-- パネルヘッダー -->
-      <div class="d-panel-header d-panel-header-blue">
-        <span style="font-weight:700;color:var(--accent-blue);">🔵 青</span>
-        <div class="d-panel-info">
-          <span id="double-right-security" class="d-info-badge">🛡 0</span>
-          <span id="double-right-deck" class="d-info-badge">📦 0</span>
-          <span id="double-right-trash" class="d-info-badge">🗑 0</span>
-          <span id="double-right-breed" class="d-info-badge">🥚 空</span>
-        </div>
+
+      <!-- プレイヤーラベル -->
+      <div class="d-player-label d-player-label-blue">
+        🔵 青
       </div>
+
+      <!-- セキュリティエリア -->
+      <div class="d-section">
+        <div class="d-area-label">SECURITY</div>
+        <div id="double-right-security-area" class="d-security-area"></div>
+      </div>
+
       <!-- バトルエリア -->
-      <div class="d-battle-wrap">
-        <div class="d-area-label">BATTLE AREA</div>
+      <div class="d-section d-battle-section">
+        <div class="d-area-label">BATTLE</div>
         <div id="double-right-battle" class="d-battle-area"></div>
       </div>
+
+      <!-- 下段：デジタマ・育成・デッキ・トラッシュ -->
+      <div class="d-bottom-row">
+        <div class="d-small-box">
+          <span class="d-box-icon">🥚</span>
+          <span class="d-box-count" id="double-right-tamago">5</span>
+          <span class="d-box-label">タマゴ</span>
+        </div>
+        <div class="d-small-box" id="double-right-breed-box">
+          <span class="d-box-icon">🌱</span>
+          <span class="d-box-count" id="double-right-breed-name">空</span>
+          <span class="d-box-label">育成</span>
+        </div>
+        <div class="d-small-box">
+          <span class="d-box-icon">🂠</span>
+          <span class="d-box-count" id="double-right-deck">50</span>
+          <span class="d-box-label">デッキ</span>
+        </div>
+        <div class="d-small-box">
+          <span class="d-box-icon">♻</span>
+          <span class="d-box-count" id="double-right-trash">0</span>
+          <span class="d-box-label">トラッシュ</span>
+        </div>
+      </div>
+
       <!-- 手札 -->
       <div class="d-hand-wrap d-hand-wrap-blue">
         <div class="d-area-label">HAND</div>
         <div id="double-right-hand" class="d-hand-area"></div>
       </div>
-    </div>
 
-  </div>
-</div>
+    </div><!-- /right -->
+
+  </div><!-- /左右盤面 -->
+</div><!-- /double-app -->
 
 
 <style>
@@ -9681,149 +9752,141 @@ window.onload = function() {
 
 /* ヘッダー */
 .d-header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 4px 12px; background: var(--bg-panel);
-  border-bottom: 1px solid rgba(255,255,255,0.06);
-  flex-shrink: 0; height: 42px; gap: 8px;
+  display:flex; align-items:center; justify-content:space-between;
+  padding:3px 10px; background:var(--bg-panel);
+  border-bottom:1px solid rgba(255,255,255,0.06);
+  flex-shrink:0; height:38px; gap:6px;
 }
 
 /* メモリーゲージ */
 .d-memory-wrap {
-  display: flex; align-items: center; gap: 6px; flex: 1; justify-content: center;
+  display:flex; align-items:center; gap:5px; flex:1; justify-content:center;
 }
-.d-memory-label { font-size: 14px; }
 .d-memory-gauge {
-  position: relative; width: 160px; height: 24px;
-  background: var(--bg-card); border-radius: 12px;
-  border: 1px solid rgba(255,255,255,0.1); overflow: hidden;
+  position:relative; width:140px; height:20px;
+  background:var(--bg-card); border-radius:10px;
+  border:1px solid rgba(255,255,255,0.1); overflow:hidden;
 }
 .d-memory-bar {
-  position: absolute; top: 0; height: 100%;
-  transition: left 0.3s, width 0.3s, background 0.3s;
-  border-radius: 12px; opacity: 0.7;
+  position:absolute; top:0; height:100%;
+  transition:left 0.3s, width 0.3s, background 0.3s;
+  border-radius:10px; opacity:0.75;
 }
 .d-memory-num {
-  position: absolute; top: 50%; left: 50%;
-  transform: translate(-50%,-50%);
-  font-size: 13px; font-weight: 900; color: var(--text-bright);
-  text-shadow: 0 0 6px rgba(0,0,0,0.8);
-  pointer-events: none;
+  position:absolute; top:50%; left:50%;
+  transform:translate(-50%,-50%);
+  font-size:12px; font-weight:900; color:var(--text-bright);
+  text-shadow:0 0 6px rgba(0,0,0,0.9);
+  pointer-events:none;
 }
 
 /* ボタン */
-.d-btn {
-  padding: 4px 12px; border: none; border-radius: 6px;
-  color: #fff; font-size: 11px; font-weight: 700; cursor: pointer;
-  letter-spacing: 0.5px; font-family: var(--font-main);
-}
-.d-btn-blue { background: var(--accent-blue); }
-.d-btn-red  { background: var(--accent-red); }
+.d-btn { padding:3px 10px; border:none; border-radius:5px; color:#fff; font-size:10px; font-weight:700; cursor:pointer; font-family:var(--font-main); }
+.d-btn-end { background:var(--accent-red); }
 
 /* 盤面パネル */
 .d-panel {
-  display: flex; flex-direction: column;
-  overflow: hidden; transition: flex 0.35s cubic-bezier(0.4,0,0.2,1);
-  position: relative;
+  display:flex; flex-direction:column; overflow:hidden;
+  transition:flex 0.35s cubic-bezier(0.4,0,0.2,1);
 }
-.d-panel-red  { flex: 3; background: rgba(224,80,80,0.02); }
-.d-panel-blue { flex: 1; background: rgba(64,128,224,0.02); }
+.d-panel-red  { flex:3; }
+.d-panel-blue { flex:1; }
 
-/* パネルヘッダー */
-.d-panel-header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 4px 10px; flex-shrink: 0; font-size: 11px;
+/* プレイヤーラベル */
+.d-player-label {
+  font-size:10px; font-weight:700; padding:2px 8px;
+  flex-shrink:0; letter-spacing:1px;
 }
-.d-panel-header-red  { background: rgba(224,80,80,0.08); border-bottom: 1px solid rgba(224,80,80,0.15); }
-.d-panel-header-blue { background: rgba(64,128,224,0.08); border-bottom: 1px solid rgba(64,128,224,0.15); }
-.d-panel-info { display: flex; gap: 6px; flex-wrap: wrap; }
-.d-info-badge { font-size: 10px; color: var(--text-dim); }
+.d-player-label-red  { background:rgba(224,80,80,0.1); color:var(--accent-red); border-bottom:1px solid rgba(224,80,80,0.15); }
+.d-player-label-blue { background:rgba(64,128,224,0.1); color:var(--accent-blue); border-bottom:1px solid rgba(64,128,224,0.15); }
 
 /* 中央分割線 */
 .d-divider {
-  width: 2px; flex-shrink: 0;
-  background: linear-gradient(180deg, rgba(224,80,80,0.3), rgba(64,128,224,0.3));
-  transition: background 0.3s;
+  width:2px; flex-shrink:0;
+  background:linear-gradient(180deg, rgba(224,80,80,0.4), rgba(64,128,224,0.4));
+  transition:background 0.3s;
+}
+
+/* セクション共通 */
+.d-section { padding:4px 6px; flex-shrink:0; }
+.d-battle-section { flex:1; overflow-y:auto; }
+.d-area-label { font-size:7px; letter-spacing:2px; color:var(--text-dim); margin-bottom:3px; text-transform:uppercase; }
+
+/* セキュリティエリア */
+.d-security-area { display:flex; flex-wrap:wrap; gap:3px; min-height:28px; }
+.d-security-card {
+  width:20px; height:28px; background:var(--bg-card);
+  border:1px solid rgba(255,255,255,0.15); border-radius:3px;
+  display:flex; align-items:center; justify-content:center;
+  font-size:10px;
 }
 
 /* バトルエリア */
-.d-battle-wrap {
-  flex: 1; padding: 6px 8px; overflow-y: auto;
+.d-battle-area { display:flex; flex-wrap:wrap; gap:5px; min-height:50px; }
+
+/* 下段ボックス列 */
+.d-bottom-row {
+  display:flex; gap:4px; padding:4px 6px;
+  flex-shrink:0; border-top:1px solid rgba(255,255,255,0.05);
 }
-.d-area-label {
-  font-size: 8px; letter-spacing: 2px; color: var(--text-dim);
-  margin-bottom: 4px; text-transform: uppercase;
+.d-small-box {
+  flex:1; background:var(--bg-card); border-radius:5px;
+  border:1px solid rgba(255,255,255,0.08);
+  display:flex; flex-direction:column; align-items:center;
+  justify-content:center; padding:3px 2px; cursor:pointer;
+  transition:border-color 0.15s;
+  min-width:0;
 }
-.d-battle-area {
-  display: flex; flex-wrap: wrap; gap: 5px; min-height: 60px;
-}
+.d-small-box:hover { border-color:rgba(255,255,255,0.25); }
+.d-box-icon  { font-size:14px; line-height:1; }
+.d-box-count { font-size:10px; font-weight:700; color:var(--text-bright); }
+.d-box-label { font-size:7px; color:var(--text-dim); letter-spacing:0.5px; }
 
 /* 手札エリア */
 .d-hand-wrap {
-  flex-shrink: 0; padding: 5px 8px;
-  border-top: 1px solid rgba(255,255,255,0.06);
-  background: rgba(0,0,0,0.15); max-height: 100px; overflow-y: auto;
+  flex-shrink:0; padding:4px 6px;
+  border-top:1px solid rgba(255,255,255,0.06);
+  background:rgba(0,0,0,0.15); max-height:95px; overflow-y:auto;
 }
-.d-hand-wrap-red  { border-top-color: rgba(224,80,80,0.12); }
-.d-hand-wrap-blue { border-top-color: rgba(64,128,224,0.12); }
-.d-hand-area {
-  display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px;
-}
+.d-hand-wrap-red  { border-top-color:rgba(224,80,80,0.12); }
+.d-hand-wrap-blue { border-top-color:rgba(64,128,224,0.12); }
+.d-hand-area { display:flex; flex-wrap:wrap; gap:3px; margin-top:3px; }
 
 /* デジモンカード（バトルエリア） */
 .double-digimon-card {
-  background: var(--bg-card);
-  border: 1px solid rgba(255,255,255,0.1);
-  border-radius: 7px; padding: 6px 8px;
-  min-width: 72px; max-width: 120px;
-  transition: transform 0.15s, border-color 0.2s;
-  user-select: none;
+  background:var(--bg-card); border:1px solid rgba(255,255,255,0.1);
+  border-radius:6px; padding:5px 7px; min-width:65px; max-width:110px;
+  transition:transform 0.15s, border-color 0.2s; user-select:none;
 }
-.double-digimon-card.active-card {
-  cursor: pointer;
-}
-.double-digimon-card.active-card:hover {
-  border-color: rgba(255,255,255,0.3);
-  transform: translateY(-3px);
-}
-.double-digimon-card.rested {
-  opacity: 0.65;
-  transform: rotate(7deg) translateY(4px);
-  transform-origin: bottom center;
-}
-.dcard-name { font-size: 10px; font-weight: 700; color: var(--text-bright); margin-bottom: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.dcard-dp   { font-size: 9px; margin-bottom: 1px; }
-.dcard-lv   { font-size: 8px; color: var(--text-dim); }
+.double-digimon-card.active-card { cursor:pointer; }
+.double-digimon-card.active-card:hover { border-color:rgba(255,255,255,0.3); transform:translateY(-3px); }
+.double-digimon-card.rested { opacity:0.65; transform:rotate(7deg) translateY(4px); transform-origin:bottom center; }
+.dcard-name { font-size:9px; font-weight:700; color:var(--text-bright); margin-bottom:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.dcard-dp   { font-size:8px; margin-bottom:1px; }
+.dcard-lv   { font-size:7px; color:var(--text-dim); }
 
 /* 手札カード */
 .double-hand-card {
-  background: var(--bg-card);
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 5px; padding: 4px 7px;
-  min-width: 60px; max-width: 100px;
-  transition: border-color 0.15s, transform 0.1s;
-  user-select: none;
+  background:var(--bg-card); border:1px solid rgba(255,255,255,0.08);
+  border-radius:5px; padding:3px 6px; min-width:55px; max-width:95px;
+  transition:border-color 0.15s, transform 0.1s; user-select:none;
 }
-.double-hand-card.active-card {
-  cursor: pointer;
-}
-.double-hand-card.active-card:hover {
-  border-color: rgba(255,255,255,0.25);
-  transform: translateY(-3px);
-}
-.hcard-name { font-size: 9px; font-weight: 700; color: var(--text-bright); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.hcard-cost { font-size: 8px; }
+.double-hand-card.active-card { cursor:pointer; }
+.double-hand-card.active-card:hover { border-color:rgba(255,255,255,0.25); transform:translateY(-3px); }
+.hcard-name { font-size:8px; font-weight:700; color:var(--text-bright); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.hcard-cost { font-size:7px; }
 
 /* アクティブパネル強調 */
-.d-panel.is-active { background: rgba(255,255,255,0.01); }
+.d-panel.is-active { background:rgba(255,255,255,0.008); }
 
-/* 横画面強制（スマホ縦向き時に警告） */
-@media (max-width: 768px) and (orientation: portrait) {
+/* 縦向き警告 */
+@media (max-width:768px) and (orientation:portrait) {
+  #double-app { position:relative; }
   #double-app::after {
-    content: '📱 横向きにしてください';
-    position: fixed; inset: 0; background: var(--bg-dark);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 18px; font-weight: 700; color: var(--text-bright);
-    z-index: 9999;
+    content:'📱 横向きにしてください';
+    position:fixed; inset:0; background:var(--bg-dark);
+    display:flex; align-items:center; justify-content:center;
+    font-size:18px; font-weight:700; color:var(--text-bright); z-index:9999;
   }
 }
 </style>
