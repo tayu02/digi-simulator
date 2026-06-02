@@ -8617,6 +8617,62 @@ function syncOppStateToGD() {
 }
 
 // ダブルモード：ゲーム画面→URL入力画面に戻る
+// ダブルモード：マリガン（赤→青の順）
+function openDoubleMulligan(side) {
+  const state = GD[side];
+  const label = side === 'left' ? '🔴 赤' : '🔵 青';
+  const color = side === 'left' ? 'var(--accent-red)' : 'var(--accent-blue)';
+
+  let html = `<p style="font-size:12px;font-weight:700;color:${color};margin-bottom:8px;">${label} の初期手札</p>`;
+  html += `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;">`;
+  for (const cId of state.myHand) {
+    const c = getCard(cId);
+    html += `<div style="background:var(--bg-card);border:1px solid rgba(255,255,255,0.1);
+      border-radius:5px;padding:5px 8px;font-size:10px;color:var(--text-bright);">
+      ${c?.name||cId}<br>
+      <span style="color:var(--text-dim);font-size:9px;">コスト${c?.cost??'?'}</span>
+    </div>`;
+  }
+  html += `</div>`;
+  html += `<div class="modal-action-row">
+    <button class="modal-btn success" onclick="confirmDoubleMulligan('${side}', false)">✅ キープ</button>
+    <button class="modal-btn warn" onclick="confirmDoubleMulligan('${side}', true)">🔄 マリガン</button>
+  </div>`;
+  openModal(`${label} マリガン確認`, html);
+}
+
+function confirmDoubleMulligan(side, doMulligan) {
+  const state = GD[side];
+  const label = side === 'left' ? '🔴 赤' : '🔵 青';
+  if (doMulligan) {
+    state.myDeck.push(...state.myHand);
+    state.myHand = [];
+    state.myDeck = state.myDeck.sort(() => Math.random() - 0.5);
+    for (let i = 0; i < 5 && state.myDeck.length > 0; i++) state.myHand.push(state.myDeck.pop());
+    log(`🔄 ${label} マリガン！手札を引き直しました`, 'system');
+  } else {
+    log(`✅ ${label} 手札をキープしました`, 'system');
+  }
+  closeModal();
+
+  // 赤が終わったら青へ、青が終わったらゲーム開始
+  if (side === 'left') {
+    openDoubleMulligan('right');
+  } else {
+    // ゲーム開始
+    G = GD.left;
+    G.memory = GD.memory;
+    G.oppBattleArea = GD.right.myBattleArea;
+    G.oppSecurity   = GD.right.mySecurity;
+    G.oppTrash      = GD.right.myTrash;
+    G.oppHand       = GD.right.myHand;
+    G.oppBreeding   = GD.right.myBreeding;
+    G.oppDeck       = GD.right.myDeck;
+    renderDouble();
+    log('===== ゲーム開始！🔴 赤のターン =====', 'win');
+  }
+}
+
 function doubleBackToInput() {
   if (!confirm('URL入力画面に戻りますか？ゲームの進行状況は失われます。')) return;
   document.getElementById('double-app').style.display = 'none';
@@ -9530,7 +9586,10 @@ function startDoubleGame() {
   document.getElementById('double-app').style.display = 'flex';
 
   renderDouble();
-  log('===== ダブルモード開始 🔴赤のターン =====', 'win');
+  log('===== ダブルモード開始 =====', 'win');
+
+  // 赤→青の順でマリガン確認
+  openDoubleMulligan('left');
 }
 
 // GをJSON経由でディープコピー
@@ -9801,7 +9860,7 @@ window.onload = function() {
 
     <!-- 赤デッキURL -->
     <div style="margin-bottom:14px;">
-      <label style="display:block;font-size:11px;letter-spacing:2px;color:var(--accent-red);margin-bottom:6px;">🔴 赤デッキ URL</label>
+      <label style="display:block;font-size:11px;letter-spacing:2px;color:var(--accent-red);margin-bottom:6px;">🔴 赤デッキ URL <span style="font-size:10px;color:var(--text-dim);letter-spacing:0;">（先行）</span></label>
       <input id="double-url-red" type="url" placeholder="https://digimoncard.dev/deck/..." style="
         width:100%;padding:10px 12px;background:var(--bg-card);
         border:1px solid var(--accent-red);border-radius:8px;
@@ -9812,7 +9871,7 @@ window.onload = function() {
 
     <!-- 青デッキURL -->
     <div style="margin-bottom:20px;">
-      <label style="display:block;font-size:11px;letter-spacing:2px;color:var(--accent-blue);margin-bottom:6px;">🔵 青デッキ URL</label>
+      <label style="display:block;font-size:11px;letter-spacing:2px;color:var(--accent-blue);margin-bottom:6px;">🔵 青デッキ URL <span style="font-size:10px;color:var(--text-dim);letter-spacing:0;">（後攻）</span></label>
       <input id="double-url-blue" type="url" placeholder="https://digimoncard.dev/deck/..." style="
         width:100%;padding:10px 12px;background:var(--bg-card);
         border:1px solid var(--accent-blue);border-radius:8px;
