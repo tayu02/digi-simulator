@@ -3434,8 +3434,8 @@ function spendMemory(cost) {
   G.memory += cost;
   if (G.memory>10) G.memory=10;
   if (G.memory<-10) G.memory=-10;
-  // ダブルモードはGD.memoryも同期
-  if (G_isDoubleMode) GD.memory = G.memory;
+  // ダブルモードはGD.memoryを絶対値で同期
+  if (G_isDoubleMode) GD.memory = Math.abs(G.memory);
   renderMemory();
 }
 
@@ -8595,6 +8595,27 @@ function executeRestOpp(instId) {
   closeModal(); render();
 }
 
+// フリーダブル：消滅ボタン処理
+function fdDestroyDigimon(instId, reason) {
+  // 自分のバトルエリアから探す
+  let inst = G.myBattleArea.find(i=>i.instanceId===instId);
+  let isMy = !!inst;
+  if (!inst) inst = G.oppBattleArea.find(i=>i.instanceId===instId);
+  if (!inst) return;
+
+  const reasonLabel = reason === 'battle' ? 'バトル' : reason === 'effect' ? '効果' : 'ルール';
+  log(`💀 ${getCard(inst.cardId)?.name} が${reasonLabel}で消滅`, 'important');
+
+  // 消滅処理（消滅トリガーを発火）
+  if (isMy) {
+    destroyDigimon(inst, 'my');
+  } else {
+    destroyDigimon(inst, 'opp');
+  }
+  syncOppStateToGD();
+  render();
+}
+
 function executeActivateTarget(instId) {
   const inst = G.myBattleArea.find(i=>i.instanceId===instId);
   if (inst) {
@@ -9552,6 +9573,14 @@ function startDoubleGame() {
   if (!vRed.ok)  { errEl.textContent = '赤デッキ: ' + vRed.error;  errEl.style.display='block'; return; }
   if (!vBlue.ok) { errEl.textContent = '青デッキ: ' + vBlue.error; errEl.style.display='block'; return; }
 
+  // セルフダブルは50枚チェック
+  if (vRed.result.mainDeck.length !== 50) {
+    errEl.textContent = `赤デッキが${vRed.result.mainDeck.length}枚です（50枚必要）`; errEl.style.display='block'; return;
+  }
+  if (vBlue.result.mainDeck.length !== 50) {
+    errEl.textContent = `青デッキが${vBlue.result.mainDeck.length}枚です（50枚必要）`; errEl.style.display='block'; return;
+  }
+
   // 左（赤）の初期ゲーム状態
   initGameState();
   loadDeckFromURL(redUrl);
@@ -9570,7 +9599,7 @@ function startDoubleGame() {
   // 赤から開始
   GD.activePlayer = 'left';
   GD.turn = 1;
-  GD.memory = 0;
+  GD.memory = 0; // 常に絶対値、activePlayerで向きを判定
 
   // Gを左（赤）に設定
   G = GD.left;
@@ -9616,12 +9645,9 @@ function doubleEndTurn() {
   G = GD[next];
   G.isMyTurn = true;
 
-  // メモリー処理：
-  // ターン終了時にメモリーが相手側（0以下）になっていれば残メモリーを渡す
-  // メモリーが0なら相手は3メモリースタート
-  const currentMem = GD.memory;
-  const nextMem = currentMem === 0 ? 3 : Math.abs(currentMem);
-  G.memory = nextMem;
+  // メモリー処理：GD.memoryは常に絶対値、activePlayerで向きを判定
+  const nextMem = GD.memory === 0 ? 3 : GD.memory;
+  G.memory = nextMem; // Gのmemoryも絶対値
   GD.memory = nextMem;
 
   // 相手側情報をopp〜に設定（効果処理で参照できるように）
@@ -9659,10 +9685,14 @@ function renderDoubleStatus() {
       const div = document.createElement('div');
       div.className = 'd-mem-cell' + (cell.val === 0 ? ' d-mem-zero' : '');
       div.textContent = cell.val;
-      // 現在値を光らせる
-      if (mem > 0 && cell.side === 'red' && cell.val === absM) div.classList.add('active-red');
-      else if (mem < 0 && cell.side === 'blue' && cell.val === absM) div.classList.add('active-blue');
-      else if (mem === 0 && cell.side === 'zero') div.classList.add(GD.activePlayer === 'left' ? 'active-red' : 'active-blue');
+      // メモリーゲージ：現在のターンプレイヤーが使った分だけ相手側に進む
+      // GD.memory > 0 = 赤側にメモリーがある（赤のターン中）→ 赤側の数字を光らせる
+      // GD.memory < 0 = 青側にメモリーがある（青のターン中）→ 青側の数字を光らせる
+      // GD.memoryは常に絶対値・activePlayerでどちら側かを判定
+      const isRed = GD.activePlayer === 'left';
+      if (isRed && cell.side === 'red' && cell.val === absM) div.classList.add('active-red');
+      else if (!isRed && cell.side === 'blue' && cell.val === absM) div.classList.add('active-blue');
+      else if (absM === 0 && cell.side === 'zero') div.classList.add(isRed ? 'active-red' : 'active-blue');
       track.appendChild(div);
     }
   }
@@ -9770,7 +9800,12 @@ function renderDoubleSide(side, state) {
       div.className = `double-digimon-card${inst.isRested?' rested':''}${isActive?' active-card':''}`;
       div.innerHTML = `<div class="dcard-name">${c?.name||'?'}</div>
         <div class="dcard-dp" style="color:${color}">DP ${dp.toLocaleString()}</div>
-        <div class="dcard-lv">Lv.${c?.level||'?'} / ${(inst.stack||[]).length}枚</div>`;
+        <div class="dcard-lv">Lv.${c?.level||'?'} / ${(inst.stack||[]).length}枚</div>
+        ${G_isFreeDouble && isActive ? `
+        <button class="fd-destroy-btn fd-destroy-battle" onclick="event.stopPropagation();fdDestroyDigimon('${inst.instanceId}','battle')">バトル消滅</button>
+        <button class="fd-destroy-btn fd-destroy-effect" onclick="event.stopPropagation();fdDestroyDigimon('${inst.instanceId}','effect')">効果消滅</button>
+        <button class="fd-destroy-btn fd-destroy-rule"   onclick="event.stopPropagation();fdDestroyDigimon('${inst.instanceId}','rule')">ルール消滅</button>
+        ` : ''}`;
       if (isActive) div.onclick = () => openDoubleBattleCardModal(inst, state);
       battleEl.appendChild(div);
     }
@@ -9795,7 +9830,6 @@ function renderDoubleSide(side, state) {
 
 // ダブルモード：手札カードのモーダル（アクティブ側のみ）
 function openDoubleHandCardModal(cardId, handIndex, state) {
-  // GがアクティブプレイヤーのGと一致していることを確認
   const card = getCard(cardId);
   if (!card) return;
   let html = buildCardDetailHTML(card);
@@ -9845,12 +9879,347 @@ function doublePlayFromHand(cardId, handIndex) {
   confirmPlayDigimon(cardId, handIndex, undefined);
 }
 
+// ===================================================
+// フリーダブルモード
+// ===================================================
+let G_isFreeDouble = false;
+let FD = {
+  currentSetupSide: 'left', // セットアップ中のプレイヤー
+  leftSetup:  { hand:[], battle:[], breeding:[], security:[], trash:[], deck:[] },
+  rightSetup: { hand:[], battle:[], breeding:[], security:[], trash:[], deck:[] },
+  startMemory: 3,
+  selectedCard: null, // タップ選択中のカード
+};
+
+// フリーダブル初期化
+function initFreeDoubleMode() {
+  G_isDoubleMode = true;
+  G_isFreeDouble = true;
+  document.getElementById('top-page').style.display = 'none';
+  document.getElementById('double-input-page').style.display = 'flex';
+  document.getElementById('double-url-red').addEventListener('input', checkDoubleReady);
+  document.getElementById('double-url-blue').addEventListener('input', checkDoubleReady);
+}
+
+// フリーダブル：URLロード後セットアップへ
+function startFreeDoubleSetup() {
+  const redUrl  = document.getElementById('double-url-red').value.trim();
+  const blueUrl = document.getElementById('double-url-blue').value.trim();
+  const errEl = document.getElementById('double-input-error');
+  errEl.style.display = 'none';
+
+  const vRed  = validateDeckURL(redUrl);
+  const vBlue = validateDeckURL(blueUrl);
+  if (!vRed.ok)  { errEl.textContent = '赤デッキ: ' + vRed.error;  errEl.style.display='block'; return; }
+  if (!vBlue.ok) { errEl.textContent = '青デッキ: ' + vBlue.error; errEl.style.display='block'; return; }
+
+  // 左（赤）のゲーム状態を初期化
+  initGameState(); loadDeckFromURL(redUrl);
+  GD.left = deepCopyG();
+  // 右（青）のゲーム状態を初期化
+  initGameState(); loadDeckFromURL(blueUrl);
+  GD.right = deepCopyG();
+
+  // セットアップ状態初期化
+  FD.leftSetup  = { hand:[], battle:[], breeding:[], security:[], trash:[], deck:[...GD.left.myDeck, ...GD.left.myTamagoDeck] };
+  FD.rightSetup = { hand:[], battle:[], breeding:[], security:[], trash:[], deck:[...GD.right.myDeck, ...GD.right.myTamagoDeck] };
+  FD.currentSetupSide = 'left';
+
+  document.getElementById('double-input-page').style.display = 'none';
+  document.getElementById('free-double-setup').style.display = 'flex';
+  renderFreeSetup();
+}
+
+// フリーセットアップ画面の描画
+function renderFreeSetup() {
+  const side = FD.currentSetupSide;
+  const setup = side === 'left' ? FD.leftSetup : FD.rightSetup;
+  const color = side === 'left' ? 'var(--accent-red)' : 'var(--accent-blue)';
+  const label = side === 'left' ? '🔴 赤のセットアップ' : '🔵 青のセットアップ';
+  const nextLabel = side === 'left' ? '青のセットアップへ →' : 'メモリー設定へ →';
+
+  document.getElementById('free-setup-title').textContent = label;
+  document.getElementById('free-setup-title').style.color = color;
+  document.getElementById('free-setup-next-btn').textContent = nextLabel;
+
+  // 未配置カード数
+  document.getElementById('free-unassigned-count').textContent = `デッキ残: ${setup.deck.length}枚`;
+
+  // 各ゾーンのカードを描画
+  const zones = ['hand','battle','breeding','security','trash','deck'];
+  for (const zone of zones) {
+    const el = document.getElementById(`fd-cards-${zone}`);
+    if (!el) continue;
+    el.innerHTML = '';
+    for (let i = 0; i < setup[zone].length; i++) {
+      const entry = setup[zone][i];
+      // entryはcardIdまたは{cardId, stack:[]}オブジェクト
+      const cId = typeof entry === 'string' ? entry : entry.cardId;
+      const c = getCard(cId);
+      const chip = document.createElement('div');
+      chip.className = 'fd-card-chip';
+      chip.textContent = c?.name || cId;
+      chip.title = c?.name || cId;
+      chip.draggable = true;
+      chip.dataset.zone = zone;
+      chip.dataset.index = i;
+      // ドラッグイベント（PC）
+      chip.addEventListener('dragstart', fdDragStart);
+      // タップ選択（スマホ・PC両対応）
+      chip.addEventListener('click', () => fdCardClick(zone, i));
+      el.appendChild(chip);
+    }
+    // ドロップゾーン設定
+    const zoneEl = document.getElementById(`fd-zone-${zone}`);
+    if (zoneEl) {
+      zoneEl.addEventListener('dragover', fdDragOver);
+      zoneEl.addEventListener('dragleave', fdDragLeave);
+      zoneEl.addEventListener('drop', (e) => fdDrop(e, zone));
+    }
+  }
+}
+
+// ドラッグ開始
+let fdDragData = null;
+function fdDragStart(e) {
+  fdDragData = { zone: e.target.dataset.zone, index: parseInt(e.target.dataset.index) };
+  e.target.style.opacity = '0.5';
+  setTimeout(() => { if(e.target) e.target.style.opacity = '1'; }, 0);
+}
+function fdDragOver(e) {
+  e.preventDefault();
+  e.currentTarget.classList.add('drag-over');
+}
+function fdDragLeave(e) {
+  e.currentTarget.classList.remove('drag-over');
+}
+function fdDrop(e, targetZone) {
+  e.preventDefault();
+  e.currentTarget.classList.remove('drag-over');
+  if (!fdDragData) return;
+  fdMoveCard(fdDragData.zone, fdDragData.index, targetZone);
+  fdDragData = null;
+}
+
+// タップ選択
+function fdCardClick(zone, index) {
+  const setup = FD.currentSetupSide === 'left' ? FD.leftSetup : FD.rightSetup;
+  const entry = setup[zone][index];
+  const cId = typeof entry === 'string' ? entry : entry.cardId;
+  const c = getCard(cId);
+
+  // バトル/育成エリアへの移動時はスタック指定モーダルを出す
+  FD.selectedCard = { zone, index, cId };
+  openFdPlaceModal(cId, zone);
+}
+
+function openFdPlaceModal(cId, fromZone) {
+  const c = getCard(cId);
+  const modal = document.getElementById('fd-place-modal');
+  const title = document.getElementById('fd-place-modal-title');
+  const body  = document.getElementById('fd-place-modal-body');
+  const setup = FD.currentSetupSide === 'left' ? FD.leftSetup : FD.rightSetup;
+
+  title.textContent = c?.name || cId;
+  let html = `<div style="display:flex;flex-direction:column;gap:6px;">`;
+
+  const zones = [
+    { id:'hand',     label:'✋ 手札' },
+    { id:'battle',   label:'⚔ バトルエリア（単体）' },
+    { id:'security', label:'🛡 セキュリティ' },
+    { id:'trash',    label:'🗑 トラッシュ' },
+    { id:'deck',     label:'📦 デッキ' },
+  ];
+
+  // バトルエリアに既存デジモンがいる場合、進化先/進化元の選択肢を追加
+  if (setup.battle.length > 0) {
+    for (let i = 0; i < setup.battle.length; i++) {
+      const entry = setup.battle[i];
+      const topId = typeof entry === 'string' ? entry : entry.cardId;
+      const topC = getCard(topId);
+      zones.push({ id:`battle_top_${i}`,    label:`⬆ ${topC?.name} の進化先` });
+      zones.push({ id:`battle_bottom_${i}`, label:`⬇ ${topC?.name} の進化元` });
+    }
+  }
+  // 育成エリアも同様
+  if (setup.breeding) {
+    const bEntry = setup.breeding[0];
+    if (bEntry) {
+      const topId = typeof bEntry === 'string' ? bEntry : bEntry.cardId;
+      const topC = getCard(topId);
+      zones.push({ id:'breeding_top',    label:`⬆ 育成(${topC?.name}) の進化先` });
+      zones.push({ id:'breeding_bottom', label:`⬇ 育成(${topC?.name}) の進化元` });
+    } else {
+      zones.push({ id:'breeding', label:'🌱 育成エリア（単体）' });
+    }
+  } else {
+    zones.push({ id:'breeding', label:'🌱 育成エリア（単体）' });
+  }
+
+  for (const z of zones) {
+    if (z.id === fromZone && !z.id.includes('_')) continue; // 同じゾーンへの単純移動は除外
+    html += `<button class="modal-btn" style="font-size:11px;" onclick="fdPlaceCard('${z.id}')">
+      ${z.label}</button>`;
+  }
+  html += `<button class="modal-btn" style="font-size:11px;" onclick="closeFdPlaceModal()">キャンセル</button>`;
+  html += `</div>`;
+  body.innerHTML = html;
+  modal.style.display = 'flex';
+}
+
+function closeFdPlaceModal() {
+  document.getElementById('fd-place-modal').style.display = 'none';
+  FD.selectedCard = null;
+}
+
+function fdPlaceCard(targetZone) {
+  if (!FD.selectedCard) return;
+  const { zone: fromZone, index, cId } = FD.selectedCard;
+  closeFdPlaceModal();
+  fdMoveCard(fromZone, index, targetZone, cId);
+}
+
+function fdMoveCard(fromZone, index, targetZone, cId) {
+  const setup = FD.currentSetupSide === 'left' ? FD.leftSetup : FD.rightSetup;
+  const entry = setup[fromZone]?.splice(index, 1)[0];
+  if (!entry) return;
+  const cardId = typeof entry === 'string' ? entry : entry.cardId;
+
+  // バトル進化先/進化元の処理
+  if (targetZone.startsWith('battle_top_')) {
+    const i = parseInt(targetZone.split('_')[2]);
+    const target = setup.battle[i];
+    if (typeof target === 'string') {
+      setup.battle[i] = { cardId: cardId, stack: [target] };
+    } else {
+      setup.battle[i] = { cardId: cardId, stack: [...(target.stack||[]), target.cardId] };
+    }
+  } else if (targetZone.startsWith('battle_bottom_')) {
+    const i = parseInt(targetZone.split('_')[2]);
+    const target = setup.battle[i];
+    if (typeof target === 'string') {
+      setup.battle[i] = { cardId: target, stack: [cardId] };
+    } else {
+      setup.battle[i] = { ...target, stack: [cardId, ...(target.stack||[])] };
+    }
+  } else if (targetZone === 'breeding_top') {
+    const b = setup.breeding[0];
+    if (b) {
+      const bId = typeof b === 'string' ? b : b.cardId;
+      setup.breeding[0] = { cardId: cardId, stack: [bId] };
+    } else {
+      // 育成エリアが空なら単体で置く
+      setup.breeding.push(cardId);
+    }
+  } else if (targetZone === 'breeding_bottom') {
+    const b = setup.breeding[0];
+    if (b) {
+      setup.breeding[0] = typeof b === 'string'
+        ? { cardId: b, stack: [cardId] }
+        : { ...b, stack: [cardId, ...(b.stack||[])] };
+    } else {
+      setup.breeding.push(cardId);
+    }
+  } else {
+    // 通常ゾーンへの移動（hand/security/trash/deck/breeding単体）
+    if (!setup[targetZone]) setup[targetZone] = [];
+    setup[targetZone].push(cardId);
+  }
+  renderFreeSetup();
+}
+
+// セットアップ次へ
+function freeSetupNext() {
+  if (FD.currentSetupSide === 'left') {
+    FD.currentSetupSide = 'right';
+    renderFreeSetup();
+  } else {
+    // メモリー設定へ
+    document.getElementById('free-double-setup').style.display = 'none';
+    document.getElementById('free-double-memory-setup').style.display = 'flex';
+    renderFreeMemorySetup();
+  }
+}
+
+// メモリー設定画面
+function renderFreeMemorySetup() {
+  const el = document.getElementById('free-memory-cells');
+  el.innerHTML = '';
+  for (let i = 1; i <= 10; i++) {
+    const div = document.createElement('div');
+    div.className = 'd-mem-cell' + (i === FD.startMemory ? ' active-red' : '');
+    div.textContent = i;
+    div.style.cursor = 'pointer';
+    div.style.width = '36px'; div.style.height = '36px'; div.style.fontSize = '13px';
+    div.onclick = () => {
+      FD.startMemory = i;
+      renderFreeMemorySetup();
+    };
+    el.appendChild(div);
+  }
+}
+
+// フリーダブルゲーム開始
+function freeDoubleStart() {
+  // 赤のゲーム状態をセットアップから構築
+  const buildState = (side) => {
+    const setup = side === 'left' ? FD.leftSetup : FD.rightSetup;
+    const baseG = side === 'left' ? GD.left : GD.right;
+    baseG.myHand       = [...setup.hand];
+    baseG.myBattleArea = setup.battle.map(entry => {
+      if (typeof entry === 'string') return newInstance(entry);
+      const inst = newInstance(entry.cardId);
+      inst.stack = [...(entry.stack||[])];
+      return inst;
+    });
+    baseG.myBreeding   = setup.breeding.length > 0
+      ? (() => { const entry = setup.breeding[0]; if (typeof entry === 'string') return newInstance(entry); const inst = newInstance(entry.cardId); inst.stack = [...(entry.stack||[])]; return inst; })()
+      : null;
+    baseG.mySecurity   = [...setup.security];
+    baseG.myTrash      = [...setup.trash];
+    baseG.myDeck       = [...setup.deck];
+    baseG.myTamagoDeck = [];
+    return baseG;
+  };
+
+  GD.left  = buildState('left');
+  GD.right = buildState('right');
+  GD.activePlayer = 'left';
+  GD.turn = 1;
+  GD.memory = FD.startMemory;
+
+  G = GD.left;
+  G.memory = GD.memory;
+  G.oppBattleArea = GD.right.myBattleArea;
+  G.oppSecurity   = GD.right.mySecurity;
+  G.oppTrash      = GD.right.myTrash;
+  G.oppHand       = GD.right.myHand;
+  G.oppBreeding   = GD.right.myBreeding;
+  G.oppDeck       = GD.right.myDeck;
+
+  document.getElementById('free-double-memory-setup').style.display = 'none';
+  document.getElementById('double-app').style.display = 'flex';
+
+  renderDouble();
+  renderDoubleStatus();
+  log('===== フリーダブル開始！🔴 赤のターン =====', 'win');
+}
+
+function freeDoubleBackToInput() {
+  document.getElementById('free-double-setup').style.display = 'none';
+  document.getElementById('double-input-page').style.display = 'flex';
+}
+
 window.onload = function() {
-  // URLパラメーターでダブルモードを検出
   const params = new URLSearchParams(window.location.search);
   if (params.get('mode') === 'double') {
     G_isDoubleMode = true;
-    initDoubleMode();
+    if (params.get('free') === '1') {
+      G_isFreeDouble = true;
+      initFreeDoubleMode();
+    } else {
+      initDoubleMode();
+    }
   } else {
     showTopPage();
   }
@@ -9890,7 +10259,7 @@ window.onload = function() {
 
     <div id="double-input-error" style="display:none;color:var(--accent-red);font-size:12px;margin-bottom:12px;"></div>
 
-    <button id="double-start-btn" disabled onclick="startDoubleGame()" style="
+    <button id="double-start-btn" disabled onclick="G_isFreeDouble ? startFreeDoubleSetup() : startDoubleGame()" style="
       width:100%;padding:14px;background:linear-gradient(135deg,var(--accent-red),var(--accent-blue));
       border:none;border-radius:10px;color:#fff;font-size:15px;font-weight:900;
       cursor:pointer;letter-spacing:2px;opacity:0.4;transition:opacity 0.2s,transform 0.1s;
@@ -9906,6 +10275,91 @@ window.onload = function() {
     <div style="text-align:center;margin-top:16px;">
       <button onclick="doubleBackToTop()" style="background:none;border:none;font-size:11px;color:var(--text-dim);cursor:pointer;text-decoration:underline;">← モード選択に戻る</button>
     </div>
+  </div>
+</div>
+
+<!-- フリーダブル：セットアップ画面 -->
+<div id="free-double-setup" style="display:none; width:100vw; height:100vh; flex-direction:column; background:var(--bg-dark); overflow:hidden;">
+
+  <!-- ヘッダー -->
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 16px;background:var(--bg-panel);border-bottom:1px solid rgba(255,255,255,0.06);flex-shrink:0;">
+    <button class="d-btn" style="background:rgba(255,255,255,0.1);" onclick="freeDoubleBackToInput()">← 戻る</button>
+    <div id="free-setup-title" style="font-size:13px;font-weight:700;color:var(--text-bright);">🔴 赤のセットアップ</div>
+    <button class="d-btn d-btn-end" id="free-setup-next-btn" onclick="freeSetupNext()">次へ →</button>
+  </div>
+
+  <!-- メインエリア：カード一覧 + 配置エリア -->
+  <div style="display:flex;flex:1;overflow:hidden;gap:0;">
+
+    <!-- 左：カード一覧 -->
+    <div style="width:220px;flex-shrink:0;display:flex;flex-direction:column;border-right:1px solid rgba(255,255,255,0.06);">
+      <div style="padding:6px 10px;font-size:9px;letter-spacing:2px;color:var(--text-dim);border-bottom:1px solid rgba(255,255,255,0.06);">
+        DECK CARDS
+        <span id="free-unassigned-count" style="color:var(--accent-yellow);margin-left:6px;"></span>
+      </div>
+      <div id="free-card-list" style="flex:1;overflow-y:auto;padding:6px;display:flex;flex-wrap:wrap;gap:4px;align-content:flex-start;"></div>
+    </div>
+
+    <!-- 右：配置エリア -->
+    <div style="flex:1;display:flex;flex-direction:column;overflow:hidden;">
+
+      <!-- 配置ゾーン -->
+      <div style="flex:1;overflow-y:auto;padding:8px;display:grid;grid-template-columns:1fr 1fr 1fr;grid-template-rows:auto auto;gap:8px;">
+
+        <!-- 手札 -->
+        <div class="fd-zone" id="fd-zone-hand" data-zone="hand">
+          <div class="fd-zone-label">✋ 手札</div>
+          <div class="fd-zone-cards" id="fd-cards-hand"></div>
+        </div>
+
+        <!-- バトルエリア -->
+        <div class="fd-zone" id="fd-zone-battle" data-zone="battle">
+          <div class="fd-zone-label">⚔ バトルエリア</div>
+          <div class="fd-zone-cards" id="fd-cards-battle"></div>
+        </div>
+
+        <!-- 育成エリア -->
+        <div class="fd-zone" id="fd-zone-breeding" data-zone="breeding">
+          <div class="fd-zone-label">🌱 育成エリア</div>
+          <div class="fd-zone-cards" id="fd-cards-breeding"></div>
+        </div>
+
+        <!-- セキュリティ -->
+        <div class="fd-zone" id="fd-zone-security" data-zone="security">
+          <div class="fd-zone-label">🛡 セキュリティ</div>
+          <div class="fd-zone-cards" id="fd-cards-security"></div>
+        </div>
+
+        <!-- トラッシュ -->
+        <div class="fd-zone" id="fd-zone-trash" data-zone="trash">
+          <div class="fd-zone-label">🗑 トラッシュ</div>
+          <div class="fd-zone-cards" id="fd-cards-trash"></div>
+        </div>
+
+        <!-- デッキ（未配置） -->
+        <div class="fd-zone" id="fd-zone-deck" data-zone="deck">
+          <div class="fd-zone-label">📦 デッキ（未指定）</div>
+          <div class="fd-zone-cards" id="fd-cards-deck"></div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- フリーダブル：メモリー設定画面 -->
+<div id="free-double-memory-setup" style="display:none; width:100vw; height:100vh; align-items:center; justify-content:center; flex-direction:column; gap:20px; background:var(--bg-dark);">
+  <div style="font-size:16px;font-weight:700;color:var(--text-bright);">開始メモリーを選んでください</div>
+  <div style="font-size:11px;color:var(--text-dim);">赤（先行）のメモリーからスタート</div>
+  <div id="free-memory-cells" style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;max-width:400px;"></div>
+  <button class="d-btn d-btn-end" style="padding:10px 32px;font-size:14px;" onclick="freeDoubleStart()">▶ ゲームスタート</button>
+</div>
+
+<!-- フリーダブル：配置確認モーダル（スタック指定用） -->
+<div id="fd-place-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;align-items:center;justify-content:center;">
+  <div style="background:var(--bg-panel);border-radius:12px;padding:20px;min-width:260px;max-width:320px;">
+    <div id="fd-place-modal-title" style="font-size:13px;font-weight:700;color:var(--text-bright);margin-bottom:12px;"></div>
+    <div id="fd-place-modal-body"></div>
   </div>
 </div>
 
@@ -10201,8 +10655,44 @@ window.onload = function() {
 .hcard-name { font-size:8px; font-weight:700; color:var(--text-bright); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .hcard-cost { font-size:7px; }
 
-/* 縦向き警告 */
-@media (max-width:768px) and (orientation:portrait) {
+/* フリーダブル：セットアップ画面 */
+.fd-zone {
+  background:var(--bg-card); border:2px dashed rgba(255,255,255,0.12);
+  border-radius:8px; padding:6px; min-height:80px;
+  transition:border-color 0.2s, background 0.2s;
+}
+.fd-zone.drag-over {
+  border-color:rgba(64,192,128,0.8);
+  background:rgba(64,192,128,0.05);
+}
+.fd-zone-label {
+  font-size:9px; letter-spacing:1px; color:var(--text-dim);
+  margin-bottom:5px; text-transform:uppercase;
+}
+.fd-zone-cards { display:flex; flex-wrap:wrap; gap:3px; }
+
+/* フリーダブル：カードチップ */
+.fd-card-chip {
+  background:var(--bg-panel); border:1px solid rgba(255,255,255,0.1);
+  border-radius:5px; padding:3px 6px; font-size:9px;
+  color:var(--text-bright); cursor:pointer;
+  transition:border-color 0.15s, transform 0.1s;
+  user-select:none; white-space:nowrap;
+  max-width:90px; overflow:hidden; text-overflow:ellipsis;
+}
+.fd-card-chip:hover { border-color:rgba(255,255,255,0.4); transform:translateY(-1px); }
+.fd-card-chip.selected { border-color:var(--accent-yellow); background:rgba(224,192,64,0.1); }
+.fd-card-chip[draggable=true] { cursor:grab; }
+.fd-card-chip[draggable=true]:active { cursor:grabbing; }
+
+/* フリーゲーム中：消滅ボタン */
+.fd-destroy-btn {
+  font-size:7px; padding:2px 4px; border:none; border-radius:3px;
+  cursor:pointer; margin-top:2px; width:100%; font-family:var(--font-main);
+}
+.fd-destroy-battle { background:rgba(224,80,80,0.7); color:#fff; }
+.fd-destroy-effect { background:rgba(160,80,224,0.7); color:#fff; }
+.fd-destroy-rule   { background:rgba(100,100,100,0.7); color:#fff; }
   #double-app::after {
     content:'📱 横向きにしてください';
     position:fixed; inset:0; background:var(--bg-dark);
