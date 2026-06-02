@@ -3434,6 +3434,8 @@ function spendMemory(cost) {
   G.memory += cost;
   if (G.memory>10) G.memory=10;
   if (G.memory<-10) G.memory=-10;
+  // ダブルモードはGD.memoryも同期
+  if (G_isDoubleMode) GD.memory = G.memory;
   renderMemory();
 }
 
@@ -9612,9 +9614,15 @@ function doubleEndTurn() {
 
   // 次のプレイヤーのGを復元
   G = GD[next];
-  G.memory = Math.abs(GD.memory);
-  GD.memory = G.memory;
   G.isMyTurn = true;
+
+  // メモリー処理：
+  // ターン終了時にメモリーが相手側（0以下）になっていれば残メモリーを渡す
+  // メモリーが0なら相手は3メモリースタート
+  const currentMem = GD.memory;
+  const nextMem = currentMem === 0 ? 3 : Math.abs(currentMem);
+  G.memory = nextMem;
+  GD.memory = nextMem;
 
   // 相手側情報をopp〜に設定（効果処理で参照できるように）
   const oppState = GD[prev];
