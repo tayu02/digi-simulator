@@ -1733,6 +1733,25 @@ const ACTION_HANDLERS = {
   "set_memory": (inst, act) => { ACTION_HANDLERS["memory_set"](inst, act); },
   // DP増加（期間によって加算先を分ける）
   "dp_boost": (inst, act) => {
+    // 相手のデジモン対象
+    if (act.target === 'choose_opp' || act.target === 'opp') {
+      ACTION_HANDLERS["destroy"]; // 参照確認用
+      const candidates = G.oppBattleArea.filter(i=>getCard(i.cardId)?.type==='デジモン');
+      if (candidates.length === 0) { log('相手のデジモンがいません','system'); return; }
+      if (candidates.length === 1) {
+        candidates[0].thisTurnDP = (candidates[0].thisTurnDP||0) + act.value;
+        log(`　→ ${getCard(candidates[0].cardId)?.name} DP${act.value>0?'+':''}${act.value}`, 'system');
+        render(); return;
+      }
+      let html = `<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
+      for (const i of candidates) {
+        const c = getCard(i.cardId);
+        html += `<button class="modal-btn warn" onclick="executeDPBoostOpp('${i.instanceId}',${act.value})">
+          ${c?.name} (DP:${getDP(i).toLocaleString()})</button>`;
+      }
+      html += `<button class="modal-btn" onclick="closeModal()">スキップ</button></div>`;
+      openModal(`相手のデジモンDP${act.value>0?'+':''}${act.value}`, html); return;
+    }
     if (!act.target || act.target === 'self') {
       const dur = act.duration || 'permanent';
       if (dur === 'this_turn' || dur === 'until_turn_end') {
@@ -2839,32 +2858,59 @@ const ACTION_HANDLERS = {
     openModal('消滅させて離れない', html);
   },
 
-  // 相手の手札をX枚破棄させる
+  // 相手の手札をX枚破棄させる（ランダム）
   "opp_discard_hand": (inst, act) => {
     const count = act.count || 1;
     if (G.oppHand.length === 0) { log('相手の手札がありません', 'system'); return; }
     const actual = Math.min(count, G.oppHand.length);
-    if (act.blind) {
-      // 見ないで破棄（ランダム）
-      for (let i = 0; i < actual; i++) {
-        const idx = Math.floor(Math.random() * G.oppHand.length);
-        const cId = G.oppHand.splice(idx, 1)[0];
-        G.oppTrash.push(cId);
-        log(`　→ 相手の手札を見ないで1枚破棄（相手手札${G.oppHand.length}枚残）`, 'system');
-      }
-    } else {
-      for (let i = 0; i < actual; i++) {
-        const idx = Math.floor(Math.random() * G.oppHand.length);
-        const cId = G.oppHand.splice(idx, 1)[0];
-        G.oppTrash.push(cId);
-        log(`　→ 相手の手札${actual}枚を破棄（相手手札${G.oppHand.length}枚残）`, 'system');
-      }
+    for (let i = 0; i < actual; i++) {
+      const idx = Math.floor(Math.random() * G.oppHand.length);
+      const cId = G.oppHand.splice(idx, 1)[0];
+      G.oppTrash.push(cId);
+      log(`　→ ${getCard(cId)?.name} を相手手札からランダム破棄（残${G.oppHand.length}枚）`, 'important');
     }
-    // onOppHandDiscarded トリガーを発火
+    syncOppStateToGD();
     const triggered = collectSpecialTriggerEffects('onOppHandDiscarded');
     if (triggered.length > 0) enqueueSimultaneous(triggered);
     render();
   },
+  // 「相手のデジモン1体の進化元をN枚破棄」
+  "trash_opp_source": (inst, act) => {
+    const count = act.count || 1;
+    const from = act.from || 'top';
+    const candidates = G.oppBattleArea.filter(i=>(i.stack?.length||0) > 0);
+    if (candidates.length === 0) { log('進化元を持つ相手のデジモンがいません','system'); return; }
+    if (candidates.length === 1) {
+      executeTrashOppSource(candidates[0].instanceId, count, from); return;
+    }
+    let html = `<p style="color:var(--text-dim);font-size:11px;margin-bottom:6px;">
+      進化元を${from==='bottom'?'下':'上'}から${count}枚破棄するデジモンを選んでください</p>`;
+    html += `<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
+    for (const i of candidates) {
+      const c = getCard(i.cardId);
+      html += `<button class="modal-btn warn"
+        onclick="executeTrashOppSource('${i.instanceId}',${count},'${from}')">
+        ${c?.name}（進化元${i.stack.length}枚）</button>`;
+    }
+    html += `<button class="modal-btn" onclick="closeModal()">スキップ</button></div>`;
+    openModal('相手の進化元を破棄', html);
+  },
+
+  "rest_opp": (inst, act) => {
+    // 相手のデジモン1体をレストさせる（選択）
+    const candidates = G.oppBattleArea.filter(i=>!i.isRested && getCard(i.cardId)?.type==='デジモン');
+    if (candidates.length === 0) { log('レストできる相手のデジモンがいません','system'); return; }
+    let html = `<p style="color:var(--text-dim);font-size:11px;margin-bottom:6px;">レストさせるデジモンを選んでください</p>`;
+    html += `<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
+    for (const i of candidates) {
+      const c = getCard(i.cardId);
+      html += `<button class="modal-btn warn" onclick="executeRestOpp('${i.instanceId}')">
+        ${c?.name} (DP:${getDP(i).toLocaleString()})</button>`;
+    }
+    html += `<button class="modal-btn" onclick="closeModal()">スキップ</button></div>`;
+    openModal('相手のデジモンをレスト', html);
+  },
+
   "rest_target": (inst, act) => { inst.isRested = true; log(`${getCard(inst.cardId)?.name} をレスト`, "system"); render(); },
   // アクティブ
   "activate_target": (inst, act) => { inst.isRested = false; log(`${getCard(inst.cardId)?.name} をアクティブ`, "system"); render(); },
@@ -3569,10 +3615,32 @@ function advanceToMain() {
   if (G.phase==="hatching") {
     G.phase="main"; updatePhaseButtons();
     log("【メインフェイズ】開始","system");
-    // ディレイ効果を実行（前のターンに登録されたもの）
-    // force_attack を持つデジモンがいれば強制アタック（相手側）
-  // シミュレーターでは相手ターンに処理するため自分のメインフェイズでは無視
-  resolveDelayedEffects();
+    // ディレイ効果を実行
+    resolveDelayedEffects();
+    // force_attackを持つ相手のデジモンがいれば強制アタック
+    const forceAttackers = G.oppBattleArea.filter(i=>i.grantedStatus?.force_attack);
+    if (forceAttackers.length > 0) {
+      for (const oppInst of forceAttackers) {
+        const c = getCard(oppInst.cardId);
+        log(`⚡ ${c?.name} が強制アタックしてきます！`, 'attack');
+        // 相手視点でアタックを処理（自分のセキュリティに攻撃）
+        const atkDP = getDP(oppInst);
+        if (G.mySecurity.length > 0) {
+          const secCardId = G.mySecurity.pop();
+          const secCard = getCard(secCardId);
+          log(`　→ セキュリティチェック: ${secCard?.name||secCardId}`, 'system');
+          // セキュリティ効果発動チェック
+          G.myTrash.push(secCardId);
+          log(`　→ セキュリティ破棄`, 'system');
+        } else {
+          log(`💥 セキュリティが0枚！ゲームオーバー寸前`, 'important');
+        }
+        // force_attackは1回使用後に解除
+        delete oppInst.grantedStatus.force_attack;
+      }
+      syncOppStateToGD();
+      render();
+    }
     // メインフェイズ開始時効果を発火（自動実行できるもの）と確認が必要なものを分ける
     const pendingEffects = [];
     for (const inst of [...G.myBattleArea]) {
@@ -5325,7 +5393,7 @@ function parseActionsFromText(t) {
   if (/トラッシュから.{0,20}手札に/.test(t)) { actions.push({type:'return_from_trash_to_hand'}); }
 
   // 相手の手札破棄アクション（「相手の手札を1枚見ないで破棄する」等）
-  const oppDiscardM = t.match(/相手(?:の手札を|は.{0,5}手札を?)(\d+)枚(?:見ないで)?破棄/);
+  const oppDiscardM = t.match(/相手(?:の手札を?|は.{0,5}手札を?)(?:見ないで)?(\d+)枚(?:見ないで)?破棄/);
   if (oppDiscardM) {
     actions.push({type:'opp_discard_hand', count: parseInt(oppDiscardM[1]), blind: /見ないで/.test(t)});
   }
@@ -5418,6 +5486,16 @@ function parseActionsFromText(t) {
 
   // 「ゲームに勝利する」
   if (/ゲームに勝利する/.test(t)) { actions.push({ type: 'game_win' }); return actions; }
+
+  // 「相手のデジモン1体の進化元をN枚破棄」（上から/下から/任意選択）
+  const oppSrcM = t.match(/相手のデジモン\d?体?の進化元(?:を[、,]?\s*|から[、,]?\s*)(上から|下から)?(\d+)?枚?破棄/);
+  if (oppSrcM) {
+    const count = oppSrcM[2] ? parseInt(oppSrcM[2]) : 1;
+    const fromStr = oppSrcM[1];
+    const from = fromStr === '下から' ? 'bottom' : fromStr === '上から' ? 'top' : 'choose';
+    actions.push({ type:'trash_opp_source', count, from });
+    return actions;
+  }
 
   // 「相手はオプションカードを使用できない」
   if (/相手はオプションカードを使用できない/.test(t)) {
@@ -7463,22 +7541,52 @@ function collectTurnStartEffects() {
 function isAutoExecutable(block) {
   const actions = block.actions || [];
   if (actions.length === 0) return false;
-  const autoTypes = ['memory_set','memory_gain','memory_lose','draw','deck_trash',
-                     'security_add','dp_boost','satk_boost','activate_self','delay'];
-  // コスト行動が含まれる場合は自動実行しない（プレイヤーの意思決定が必要）
-  const costTypes = ['rest_this_tamer','return_this_to_deck_bottom',
-                     'play_free_conditional','name_branch_play','reveal_deck_top',
-                     'trash_to_deck_top','hand_to_deck_top'];
-  return actions.every(act => {
-    if (costTypes.includes(act.type)) return false;
-    if (autoTypes.includes(act.type)) return true;
+
+  // 選択が必要なもの（プレイヤーの意思決定が必要）
+  const requiresChoiceTypes = [
+    // コスト行動
+    'rest_this_tamer_as_cost',
+    'return_this_to_deck_bottom',
+    // 対象選択が必要な効果
+    'destroy',           // 消滅（対象選択）
+    'bounce',            // バウンス（対象選択）
+    'rest_opp',          // 相手レスト（対象選択）
+    'trash_opp_source',  // 相手進化元破棄（対象選択）
+    'evolve_from_hand',  // 手札から進化（選択）
+    'evolve_from_trash_with_cost', // トラッシュから進化（選択）
+    'play_free_conditional',       // 条件付き登場（選択）
+    'name_branch_play',            // 名称分岐登場（選択）
+    'reveal_deck_top',             // デッキオープン（選択）
+    'trash_to_deck_top',           // トラッシュからデッキ上（選択）
+    'hand_to_deck_top',            // 手札からデッキ上（選択）
+    'return_from_trash_to_hand',   // トラッシュから手札（選択）
+    'choose_one',                  // 以下の効果から1つ選ぶ
+    'execute_battle_choose',       // 任意バトル
+    'grant_force_attack',          // 強制アタック付与（対象選択）
+    'activate_target',             // アクティブにする（対象選択）
+    'dp_boost',                    // DP±（choose_opp等の場合のみ）
+    'opp_optional_choose',         // 相手が選ぶ
+  ];
+
+  const needsChoice = (act) => {
+    if (requiresChoiceTypes.includes(act.type)) {
+      // dp_boostはself対象なら自動
+      if (act.type === 'dp_boost' && (!act.target || act.target === 'self' || act.target === 'last_played')) return false;
+      // destroyは自分のデジモンを対象にする場合（コスト行動等）は手動
+      if (act.type === 'destroy' && act.side === 'my') return true;
+      if (act.type === 'bounce' && act.side === 'opp') return true;
+      return true;
+    }
     if (act.type === 'if_then') {
-      // if_thenの中にコスト行動があれば自動実行しない
-      if ((act.actions||[]).some(sub => costTypes.includes(sub.type))) return false;
-      return (act.actions||[]).every(sub => autoTypes.includes(sub.type));
+      return (act.actions||[]).some(sub => needsChoice(sub));
+    }
+    if (act.type === 'sequential' || act.type === 'then') {
+      return (act.actions||[]).some(sub => needsChoice(sub));
     }
     return false;
-  });
+  };
+
+  return !actions.some(act => needsChoice(act));
 }
 
 // フェイズ開始時効果の確認モーダル（汎用）
@@ -8421,6 +8529,70 @@ function executeChooseOne(idx) {
   }
 }
 
+function executeDPBoostOpp(instId, value) {
+  const inst = G.oppBattleArea.find(i=>i.instanceId===instId);
+  if (inst) {
+    inst.thisTurnDP = (inst.thisTurnDP||0) + value;
+    log(`　→ ${getCard(inst.cardId)?.name} DP${value>0?'+':''}${value}`, 'system');
+  }
+  closeModal(); render();
+}
+
+function executeTrashOppSource(instId, count, from) {
+  const inst = G.oppBattleArea.find(i=>i.instanceId===instId);
+  if (!inst) { closeModal(); return; }
+  if (from === 'choose') {
+    // 好きな枚数を選択モーダルで選ぶ
+    let html = `<p style="color:var(--text-dim);font-size:11px;margin-bottom:6px;">
+      破棄する進化元を${count}枚選んでください</p>`;
+    html += `<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
+    for (let i = inst.stack.length - 1; i >= 0; i--) {
+      const c = getCard(inst.stack[i]);
+      html += `<button class="modal-btn warn"
+        onclick="pickOppSourceCard('${instId}',${i},${count})">
+        ${c?.name||inst.stack[i]}</button>`;
+    }
+    html += `<button class="modal-btn" onclick="closeModal()">スキップ</button></div>`;
+    G._oppSourcePickTarget = { instId, count, picked: [] };
+    openModal('進化元を選んで破棄', html); return;
+  }
+  const actual = Math.min(count, inst.stack.length);
+  for (let i = 0; i < actual; i++) {
+    const srcId = from === 'bottom' ? inst.stack.shift() : inst.stack.pop();
+    G.oppTrash.push(srcId);
+    log(`　→ ${getCard(srcId)?.name||srcId} を相手の進化元から破棄`, 'important');
+  }
+  closeModal();
+  syncOppStateToGD();
+  render();
+}
+
+function pickOppSourceCard(instId, stackIdx, count) {
+  const p = G._oppSourcePickTarget;
+  if (!p) { closeModal(); return; }
+  const inst = G.oppBattleArea.find(i=>i.instanceId===instId);
+  if (!inst) { closeModal(); return; }
+  const srcId = inst.stack.splice(stackIdx, 1)[0];
+  G.oppTrash.push(srcId);
+  log(`　→ ${getCard(srcId)?.name||srcId} を相手の進化元から破棄`, 'important');
+  p.picked.push(srcId);
+  if (p.picked.length >= count || inst.stack.length === 0) {
+    G._oppSourcePickTarget = null;
+    closeModal(); syncOppStateToGD(); render(); return;
+  }
+  // 残り枚数を選択
+  executeTrashOppSource(instId, count - p.picked.length, 'choose');
+}
+
+function executeRestOpp(instId) {
+  const inst = G.oppBattleArea.find(i=>i.instanceId===instId);
+  if (inst) {
+    inst.isRested = true;
+    log(`　→ ${getCard(inst.cardId)?.name} をレストさせました`, 'important');
+  }
+  closeModal(); render();
+}
+
 function executeActivateTarget(instId) {
   const inst = G.myBattleArea.find(i=>i.instanceId===instId);
   if (inst) {
@@ -8428,6 +8600,35 @@ function executeActivateTarget(instId) {
     log(`　→ ${getCard(inst.cardId)?.name} をアクティブにしました`, 'important');
   }
   closeModal(); render();
+}
+
+// ダブルモード：相手側の状態変更をGDに反映する
+// G.oppBattleArea等への変更はGD[相手側]に書き戻す必要がある
+function syncOppStateToGD() {
+  if (!G_isDoubleMode) return;
+  const oppSide = GD.activePlayer === 'left' ? 'right' : 'left';
+  if (!GD[oppSide]) return;
+  GD[oppSide].myBattleArea = G.oppBattleArea;
+  GD[oppSide].mySecurity   = G.oppSecurity;
+  GD[oppSide].myTrash      = G.oppTrash;
+  GD[oppSide].myHand       = G.oppHand;
+  GD[oppSide].myBreeding   = G.oppBreeding;
+  GD[oppSide].myDeck       = G.oppDeck;
+}
+
+// ダブルモード：ゲーム画面→URL入力画面に戻る
+function doubleBackToInput() {
+  if (!confirm('URL入力画面に戻りますか？ゲームの進行状況は失われます。')) return;
+  document.getElementById('double-app').style.display = 'none';
+  document.getElementById('double-input-page').style.display = 'flex';
+  GD.left = null; GD.right = null;
+}
+
+// ダブルモード：URL入力画面→モード選択に戻る
+function doubleBackToTop() {
+  document.getElementById('double-input-page').style.display = 'none';
+  G_isDoubleMode = false;
+  window.location.href = window.location.pathname; // パラメーターを除いてリロード
 }
 
 function executeDestroyThenActivate(activateInstId, destroyInstId) {
@@ -8862,8 +9063,9 @@ function openBreedingMenu() {
 // 描画
 // ===================================================
 function render() {
-  // ダブルモードの場合は両盤面をrenderDouble経由で更新
+  // ダブルモードの場合は相手側状態を同期してから両盤面をrenderDouble経由で更新
   if (G_isDoubleMode) {
+    syncOppStateToGD();
     renderDouble();
     renderMemory();
     return;
@@ -9310,11 +9512,18 @@ function startDoubleGame() {
   // 赤から開始
   GD.activePlayer = 'left';
   GD.turn = 1;
-  GD.memory = 3;
+  GD.memory = 0;
 
   // Gを左（赤）に設定
   G = GD.left;
   G.memory = GD.memory;
+  // 相手側情報をopp〜に設定
+  G.oppBattleArea = GD.right.myBattleArea;
+  G.oppSecurity   = GD.right.mySecurity;
+  G.oppTrash      = GD.right.myTrash;
+  G.oppHand       = GD.right.myHand;
+  G.oppBreeding   = GD.right.myBreeding;
+  G.oppDeck       = GD.right.myDeck;
 
   // UI切り替え
   document.getElementById('double-input-page').style.display = 'none';
@@ -9333,29 +9542,34 @@ function deepCopyG() {
 // ダブルモード：ターン終了
 function doubleEndTurn() {
   // 現在プレイヤーのGを保存
-  GD[GD.activePlayer] = deepCopyG();
-  GD[GD.activePlayer].memory = GD.memory;
+  const prev = GD.activePlayer;
+  GD[prev] = deepCopyG();
+  GD[prev].memory = GD.memory;
 
-  // 相手側に切り替え
-  const next = GD.activePlayer === 'left' ? 'right' : 'left';
+  // 次のプレイヤーに切り替え
+  const next = prev === 'left' ? 'right' : 'left';
   GD.activePlayer = next;
   if (next === 'left') GD.turn++;
 
-  // 相手側のGを復元してアクティブに
+  // 次のプレイヤーのGを復元
   G = GD[next];
-  // メモリーを相手側に移動（メモリーが余ったら相手に渡す）
-  const mem = GD.memory;
-  // ターン終了時メモリーが0より大きければ相手のターン開始メモリーとして渡す
-  G.memory = Math.abs(mem) > 0 ? Math.abs(mem) : 3;
+  G.memory = Math.abs(GD.memory);
   GD.memory = G.memory;
   G.isMyTurn = true;
+
+  // 相手側情報をopp〜に設定（効果処理で参照できるように）
+  const oppState = GD[prev];
+  G.oppBattleArea = oppState.myBattleArea;
+  G.oppSecurity   = oppState.mySecurity;
+  G.oppTrash      = oppState.myTrash;
+  G.oppHand       = oppState.myHand;
+  G.oppBreeding   = oppState.myBreeding;
+  G.oppDeck       = oppState.myDeck;
 
   renderDouble();
   renderDoubleStatus();
   const label = next === 'left' ? '🔴 赤' : '🔵 青';
   log(`--- ${label} のターン開始（ターン${GD.turn}）---`, 'win');
-
-  // アクティブフェイズ
   doActivePhase();
 }
 
@@ -9388,7 +9602,13 @@ function renderDoubleStatus() {
 
   // ターンラベル
   const turnEl = document.getElementById('double-turn-label');
-  if (turnEl) turnEl.textContent = `T${GD.turn} ${GD.activePlayer === 'left' ? '🔴 赤' : '🔵 青'}のターン`;
+  if (turnEl) {
+    const state = GD.activePlayer === 'left' ? GD.left : GD.right;
+    const deckName = state?.deckName;
+    const label = GD.activePlayer === 'left' ? '🔴' : '🔵';
+    const name = deckName && deckName !== 'テストデッキ' ? deckName : (GD.activePlayer === 'left' ? '赤' : '青');
+    turnEl.textContent = `T${GD.turn} ${label} ${name}のターン`;
+  }
 
   // パネルサイズ
   const lp = document.getElementById('double-panel-left');
@@ -9608,7 +9828,7 @@ window.onload = function() {
     </style>
 
     <div style="text-align:center;margin-top:16px;">
-      <a href="index.html" style="font-size:11px;color:var(--text-dim);text-decoration:none;">← トップに戻る</a>
+      <button onclick="doubleBackToTop()" style="background:none;border:none;font-size:11px;color:var(--text-dim);cursor:pointer;text-decoration:underline;">← モード選択に戻る</button>
     </div>
   </div>
 </div>
@@ -9618,7 +9838,8 @@ window.onload = function() {
 
   <!-- ヘッダー -->
   <div class="d-header">
-    <div style="display:flex;align-items:center;gap:8px;min-width:100px;">
+    <div style="display:flex;align-items:center;gap:6px;min-width:100px;">
+      <button class="d-btn" style="background:rgba(255,255,255,0.1);font-size:9px;" onclick="doubleBackToInput()">← 戻る</button>
       <span id="double-turn-label" style="font-size:10px;font-weight:700;color:var(--text-bright);white-space:nowrap;"></span>
     </div>
     <!-- メモリーゲージ -->
@@ -9626,7 +9847,7 @@ window.onload = function() {
       <div class="d-memory-track" id="double-memory-track"></div>
     </div>
     <div style="min-width:100px;display:flex;justify-content:flex-end;">
-      <button class="d-btn d-btn-end" onclick="doubleEndTurn()">終了</button>
+      <button class="d-btn d-btn-end" onclick="doubleEndTurn()">パス</button>
     </div>
   </div>
 
@@ -9638,18 +9859,16 @@ window.onload = function() {
       <div class="d-player-label d-player-label-red">🔴 赤</div>
       <!-- メインエリア：左列・バトル・右列 -->
       <div class="d-main-area">
-        <!-- 左列：セキュリティ・デジタマ・育成 -->
+        <!-- 左列：セキュリティ・デジタマ・育成（横並び） -->
         <div class="d-left-col">
           <div class="d-area-label">SEC</div>
           <div id="double-left-security-area" class="d-security-area"></div>
-          <div style="margin-top:6px;">
+          <div class="d-tamago-breed-row">
             <div class="d-small-box">
               <span class="d-box-icon">🥚</span>
               <span class="d-box-count" id="double-left-tamago">5</span>
               <span class="d-box-label">タマゴ</span>
             </div>
-          </div>
-          <div style="margin-top:4px;">
             <div class="d-small-box" id="double-left-breed-box">
               <span class="d-box-icon">🌱</span>
               <span class="d-box-count" id="double-left-breed-name">空</span>
@@ -9693,18 +9912,16 @@ window.onload = function() {
       <div class="d-player-label d-player-label-blue">🔵 青</div>
       <!-- メインエリア：左列・バトル・右列 -->
       <div class="d-main-area">
-        <!-- 左列：セキュリティ・デジタマ・育成 -->
+        <!-- 左列：セキュリティ・デジタマ・育成（横並び） -->
         <div class="d-left-col">
           <div class="d-area-label">SEC</div>
           <div id="double-right-security-area" class="d-security-area"></div>
-          <div style="margin-top:6px;">
+          <div class="d-tamago-breed-row">
             <div class="d-small-box">
               <span class="d-box-icon">🥚</span>
               <span class="d-box-count" id="double-right-tamago">5</span>
               <span class="d-box-label">タマゴ</span>
             </div>
-          </div>
-          <div style="margin-top:4px;">
             <div class="d-small-box" id="double-right-breed-box">
               <span class="d-box-icon">🌱</span>
               <span class="d-box-count" id="double-right-breed-name">空</span>
@@ -9820,6 +10037,7 @@ window.onload = function() {
 
 /* セキュリティ縦並び */
 .d-security-area { display:flex; flex-direction:column; gap:2px; }
+.d-tamago-breed-row { display:flex; gap:3px; margin-top:5px; }
 .d-security-card {
   width:36px; height:26px;
   background:var(--bg-card); border:1px solid rgba(255,255,255,0.15);
