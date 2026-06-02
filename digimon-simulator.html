@@ -1005,6 +1005,7 @@ const TRIGGER_PATTERNS = [
   { pattern:/アタック終了時/, trigger:"onAttackEnd" },
   { pattern:/アタック時/, trigger:"onAttack" },
   { pattern:/ターン開始時/, trigger:"onTurnStart" },
+  { pattern:/リンク時/, trigger:"リンク時" },
   { pattern:/ターン終了時/, trigger:"onTurnEnd" },
   { pattern:/登場時/, trigger:"onPlay" },
   { pattern:/進化時/, trigger:"onEvolve" },
@@ -1252,6 +1253,10 @@ function checkCondition(condition, inst) {
       const allText = (selfCard?.name||'') + (selfCard?._effect_text||'') + (selfCard?._evolved_text||'');
       return allText.includes(condition.nameContains);
     }
+    // ジョグレス進化していたなら
+    case "is_jogressed":
+      return !!inst?.isJogressed;
+
     // このデジモンが特徴に「X」か「Y」を持つ（anyOf: どれか1つでもOK）
     case "self_has_feature": {
       const selfCard2 = getCard(inst?.cardId);
@@ -1348,6 +1353,8 @@ const KEYWORD_PATTERNS = [
   { pattern:/天昇/,       keyword:"ascension" },
   { pattern:/氷装/,       keyword:"ice_armor" },
   { pattern:/アーマー解除|パージ/, keyword:"armor_purge" },
+  { pattern:/^セーブ$/, keyword:"save" },
+  { pattern:/マテリアルセーブ/, keyword:"material_save" },
   { pattern:/再起動/,     keyword:"reboot" },
   { pattern:/ブロッカー/, keyword:"blocker" },
   { pattern:/デコイ/,     keyword:"decoy" },
@@ -1441,6 +1448,7 @@ function convertDBCard(dbCard) {
     digivolveSource: [],
     _effect_text: effectText,            // 効果テキスト
     _evolved_text: evolvedText,          // 進化元効果テキスト
+    _evocost_text: dbCard.effect || '',  // デジクロス・ジョグレス・アプ合体条件テキスト
     _security_text: securityText,        // セキュリティ効果テキスト
     _parsed_effects: buildParsedEffects(effectText),        // 構造化済み効果データ
     _parsed_evolved: buildParsedEffects(evolvedText),       // 構造化済み進化元効果
@@ -2745,6 +2753,19 @@ const ACTION_HANDLERS = {
     log(`　→ ${getCard(inst.cardId)?.name}：色「${act.color}」としても扱います`, 'important');
   },
 
+  // マインドリンク
+  "mind_link": (inst, act) => {
+    openMindLinkModal(inst.instanceId);
+  },
+
+  // 置いたカードの進化時効果を発揮（BT10-112）
+  "placed_card_evo_effect": (inst, act) => {
+    // 直前にスタックに追加されたカードを対象とする
+    if ((inst.stack?.length||0) === 0) { log('進化元がありません','system'); return; }
+    const placedCardId = inst.stack[inst.stack.length-1]; // 一番上（最後に置かれた）
+    activatePlacedCardEvoEffect(inst, placedCardId);
+  },
+
   // ゲーム勝利
   "game_win": (inst, act) => {
     log('🏆 勝利条件達成！ゲームに勝利します！', 'win');
@@ -3202,6 +3223,12 @@ function newInstance(cardId, stack=[]) {
     instanceId:"i"+G.instanceCounter, cardId, stack:[...stack],
     isRested:false, tempKeywords:[], tempDP:0, tempSatk:0, thisTurnDP:0,
     usedThisTurn:false, subTriggerUsed:false,
+    // フェーズ3追加フィールド
+    isJogressed:false,      // ジョグレス進化していたなら の判定用
+    linkCard:null,          // リンクカード { cardId, dpBonus }
+    savedCards:[],          // セーブされたカード一覧
+    delayReady:false,       // ディレイ発動条件が整っているか
+    delayTurnPlaced:null,   // バトルエリアに置かれたターン
   };
 }
 
@@ -3311,6 +3338,8 @@ function getDP(inst) {
       }
     }
   }
+  // リンクカードのDP加算
+  if (inst.linkCard?.dpBonus) dp += inst.linkCard.dpBonus;
   return dp;
 }
 function getSAtk(inst) {
@@ -3848,6 +3877,17 @@ function openPlayDigimonModal(cardId, handIndex) {
     : `<div style="color:var(--accent-red);font-size:11px;">⚠ コスト不足（必要: ${playCost}）</div>`;
   if (evoCandidates.length>0||breedingEvo) {
     html += `<button class="modal-btn primary" onclick="openEvolutionSelect('${cardId}',${handIndex})">進化する</button>`;
+  }
+  // デジクロス・ジョグレス・アプ合体ボタン
+  const evocostText = card._evocost_text||'';
+  if (/デジクロス/.test(evocostText)) {
+    html += `<button class="modal-btn primary" onclick="closeModal();openDigixrosModal('${cardId}',${handIndex})">🔀 デジクロス</button>`;
+  }
+  if (/ジョグレス/.test(evocostText)) {
+    html += `<button class="modal-btn primary" onclick="closeModal();openJogressModal('${cardId}',${handIndex})">⬆ ジョグレス</button>`;
+  }
+  if (/アプ合体/.test(evocostText)) {
+    html += `<button class="modal-btn primary" onclick="closeModal();openAppCombineModal('${cardId}',${handIndex})">⬆ アプ合体</button>`;
   }
   html += `<button class="modal-btn" onclick="closeModal()">キャンセル</button></div>`;
   openModal(card.name, html);
@@ -5486,8 +5526,29 @@ function parseActionsFromText(t) {
     return actions;
   }
 
+  // 「ジョグレス進化していたなら」条件
+  const jogressedM = t.match(/ジョグレス進化していたなら、(.+)$/);
+  if (jogressedM) {
+    const sub = parseActionsFromText(jogressedM[1].trim());
+    actions.push({ type:'if_then', condition:{type:'is_jogressed'}, actions:sub });
+    return actions;
+  }
+
   // 「ゲームに勝利する」
   if (/ゲームに勝利する/.test(t)) { actions.push({ type: 'game_win' }); return actions; }
+
+  // マインドリンク
+  if (/マインドリンク/.test(t)) {
+    const ftM = t.match(/特徴(?:に)?「([^」]+)」(?:\/「([^」]+)」)*を持つ/);
+    const nameM = t.match(/名称に「([^」]+)」/);
+    const features = ftM ? [...t.matchAll(/「([^」]+)」/g)].map(m=>m[1]) : null;
+    actions.push({ type:'mind_link', filter:{ features, nameContains: nameM?.[1]||null } }); return actions;
+  }
+
+  // 「置いたカードの進化時効果を発揮」（BT10-112）
+  if (/置いたカードの進化時効果/.test(t)) {
+    actions.push({ type:'placed_card_evo_effect' }); return actions;
+  }
 
   // 「相手のデジモン1体の進化元をN枚破棄」（上から/下から/任意選択）
   const oppSrcM = t.match(/相手のデジモン\d?体?の進化元(?:を[、,]?\s*|から[、,]?\s*)(上から|下から)?(\d+)?枚?破棄/);
@@ -6466,6 +6527,13 @@ function collectSpecialTriggerEffects(triggerId, sourceInst=null, playedCardName
       }
     }
   }
+  // 進化元継承効果（「進化元にある〜の効果全てを得る」）も収集
+  for (const { inst } of searchTargets.filter(t=>!t.inTrash)) {
+    for (const e of collectInheritedSourceEffects(triggerId, inst)) {
+      collected.push(e);
+    }
+  }
+
   return collected;
 }
 
@@ -7257,8 +7325,31 @@ function doSecurityCheck(attacker) {
 function destroyDigimon(inst, side) {
   const card = getCard(inst.cardId);
   log(`💀 ${card?.name||inst.cardId} 消滅（進化元${inst.stack.length}枚もトラッシュへ）`,"attack");
-  // キーワード処理（天昇・不屈・アーマー解除）
-  if (side==="my") {
+  // セーブキーワードを持つデジモンは消滅時テイマー下に置く（自分側のみ）
+  if (side === 'my') {
+    const hasSave = hasKeyword(inst,'save') || hasKeyword(inst,'material_save');
+    if (hasSave) {
+      G._pendingSaveCardId = inst.cardId;
+      const saved = activateSave(inst);
+      if (saved) {
+        for (const srcId of (inst.stack||[])) G.myTrash.push(srcId);
+        G.myBattleArea = G.myBattleArea.filter(i=>i.instanceId!==inst.instanceId);
+        render(); return;
+      }
+      G._pendingSaveCardId = null;
+    }
+    // テイマーが消滅する場合、セーブカードも全てトラッシュへ
+    if (card?.type === 'テイマー' && inst.savedCards?.length > 0) {
+      for (const savedId of inst.savedCards) {
+        G.myTrash.push(savedId);
+        log(`💾 セーブカード ${getCard(savedId)?.name} がトラッシュへ`,'system');
+      }
+    }
+    // リンクカードもトラッシュへ
+    if (inst.linkCard) {
+      G.myTrash.push(inst.linkCard.cardId);
+      inst.linkCard = null;
+    }
     // 天昇
     if (hasKeyword(inst,"ascension")) {
       G.mySecurity.unshift(inst.cardId);
@@ -10210,6 +10301,599 @@ function freeDoubleBackToInput() {
   document.getElementById('double-input-page').style.display = 'flex';
 }
 
+// ===================================================
+// フェーズ3：デジクロス
+// ===================================================
+
+function parseDigixros(evocostText) {
+  const match = evocostText.match(/デジクロス-(\d+)[：::](.+)/);
+  if (!match) return null;
+  const discount = parseInt(match[1]);
+  const conditions = match[2].split('×').map(s => s.trim());
+  return { discount, conditions };
+}
+
+function matchDigixrosCondition(card, condText) {
+  if (!card) return false;
+  // 「「カード名」」形式
+  const names = [...condText.matchAll(/「([^」]+)」/g)].map(m=>m[1]);
+  if (names.length > 0) return names.some(n => (card.name||'').includes(n));
+  // 「名称に「〇〇」を含むLv.N」
+  const ncM = condText.match(/名称に「([^」]+)」を含むLv\.(\d+)/);
+  if (ncM) return (card.name||'').includes(ncM[1]) && String(card.level)===ncM[2];
+  // 「特徴に「〇〇」を持つLv.N」
+  const ftM = condText.match(/特徴(?:に)?「([^」]+)」を持つLv\.(\d+)/);
+  if (ftM) return (card.features||[]).includes(ftM[1]) && String(card.level)===ftM[2];
+  return false;
+}
+
+function findDigixrosCandidates(conditions) {
+  const hand = G.myHand.map((cId,idx)=>({cId, source:'hand', idx}));
+  const battle = G.myBattleArea
+    .filter(i=>getCard(i.cardId)?.type==='デジモン')
+    .map(inst=>({cId:inst.cardId, source:'battle', inst}));
+  const all = [...hand, ...battle];
+  return conditions.map(cond=>({
+    condition: cond,
+    matched: all.filter(t=>matchDigixrosCondition(getCard(t.cId), cond))
+  }));
+}
+
+function openDigixrosModal(cardId, handIndex) {
+  const card = getCard(cardId);
+  const digixros = parseDigixros(card._evocost_text||'');
+  if (!digixros) return;
+  const candidates = findDigixrosCandidates(digixros.conditions);
+  G._digixrosState = { cardId, handIndex, digixros, selected:[], candidates };
+
+  let html = `<p style="color:var(--text-dim);font-size:11px;margin-bottom:8px;">
+    デジクロス対象を選択（1枚につきコスト-${digixros.discount}）</p>`;
+  let baseCost = card.cost||0;
+  html += `<div id="dxros-cost" style="color:var(--accent-yellow);font-size:12px;font-weight:700;margin-bottom:8px;">
+    現在のコスト: ${baseCost}</div>`;
+
+  for (const {condition, matched} of candidates) {
+    html += `<div style="margin-bottom:8px;">
+      <div style="font-size:9px;color:var(--text-dim);margin-bottom:4px;">${condition}</div>`;
+    if (matched.length === 0) {
+      html += `<span style="font-size:10px;color:var(--accent-red);">該当なし</span>`;
+    }
+    for (const t of matched) {
+      const c = getCard(t.cId);
+      const tid = t.source==='hand' ? `h_${t.idx}` : `b_${t.inst.instanceId}`;
+      html += `<button class="modal-btn" id="dxbtn_${tid}"
+        onclick="toggleDigixrosSelect('${tid}')">
+        ${c?.name}（${t.source==='hand'?'手札':'バトルエリア'}）</button>`;
+    }
+    html += `</div>`;
+  }
+
+  html += `<div class="modal-action-row">
+    <button class="modal-btn warn" onclick="confirmDigixros()">登場</button>
+    <button class="modal-btn" onclick="closeModal()">キャンセル</button>
+  </div>`;
+  openModal(`デジクロス: ${card.name}`, html);
+}
+
+function toggleDigixrosSelect(tid) {
+  const st = G._digixrosState;
+  if (!st) return;
+  const btn = document.getElementById(`dxbtn_${tid}`);
+  const idx = st.selected.indexOf(tid);
+  if (idx >= 0) {
+    st.selected.splice(idx,1);
+    if (btn) btn.className = 'modal-btn';
+  } else {
+    st.selected.push(tid);
+    if (btn) btn.className = 'modal-btn primary';
+  }
+  const discount = st.selected.length * st.digixros.discount;
+  const cost = Math.max(0, (getCard(st.cardId)?.cost||0) - discount);
+  const costEl = document.getElementById('dxros-cost');
+  if (costEl) costEl.textContent = `現在のコスト: ${cost}`;
+}
+
+function confirmDigixros() {
+  const st = G._digixrosState;
+  if (!st) return;
+  const { cardId, handIndex, digixros, selected } = st;
+  const card = getCard(cardId);
+  const discount = selected.length * digixros.discount;
+  const finalCost = Math.max(0, (card.cost||0) - discount);
+
+  if (!canAfford(finalCost)) { log(`コスト不足（必要:${finalCost}）`,'system'); return; }
+
+  // 手札から除去
+  G.myHand.splice(handIndex,1);
+  const inst = newInstance(cardId);
+  inst.usedThisTurn = true;
+
+  // 選択されたカードを進化元に入れる
+  // バトルエリアのカードは後でインデックスがずれるので先に処理
+  const battleIds = selected.filter(t=>t.startsWith('b_')).map(t=>t.slice(2));
+  const handIdxs = selected.filter(t=>t.startsWith('h_')).map(t=>parseInt(t.slice(2))).sort((a,b)=>b-a);
+
+  for (const iid of battleIds) {
+    const ti = G.myBattleArea.find(i=>i.instanceId===iid);
+    if (ti) {
+      for (const srcId of ti.stack) G.myTrash.push(srcId); // 元の進化元を破棄（消滅時効果なし）
+      inst.stack.push(ti.cardId);
+      G.myBattleArea = G.myBattleArea.filter(i=>i.instanceId!==iid);
+    }
+  }
+  for (const hi of handIdxs) {
+    const cId = G.myHand.splice(hi,1)[0];
+    if (cId) inst.stack.push(cId);
+  }
+
+  G.myBattleArea.push(inst);
+  spendMemory(finalCost);
+  closeModal();
+  G._digixrosState = null;
+  log(`🔀 デジクロス！${card.name} が登場！（コスト${finalCost}）`, 'evolve');
+  triggerEffect(inst,'登場時',G.myBattleArea,G.myTrash);
+  render(); checkTurnEnd();
+}
+
+// ===================================================
+// フェーズ3：ジョグレス
+// ===================================================
+
+function parseJogress(evocostText) {
+  const match = evocostText.match(/ジョグレス[〕：:](.+?)\+(.+?)(?:[：::]コスト(\d+))?$/);
+  if (!match) return null;
+  return { condA:match[1].trim(), condB:match[2].trim(), cost:parseInt(match[3]||'0') };
+}
+
+function matchJogressCondition(card, condText) {
+  if (!card) return false;
+  const clM = condText.match(/([赤青緑黄黒紫白]+)Lv\.(\d+)/);
+  if (clM) {
+    const col = clM[1];
+    const lv = clM[2];
+    return (card.color||[]).some(c=>col.includes(c)) && String(card.level)===lv;
+  }
+  const nM = condText.match(/「([^」]+)」/);
+  if (nM) return (card.name||'').includes(nM[1]);
+  return false;
+}
+
+function openJogressModal(cardId, handIndex) {
+  const card = getCard(cardId);
+  const jogress = parseJogress(card._evocost_text||'');
+  if (!jogress) return;
+  const candidatesA = G.myBattleArea.filter(i=>matchJogressCondition(getCard(i.cardId), jogress.condA));
+  const candidatesB = G.myBattleArea.filter(i=>matchJogressCondition(getCard(i.cardId), jogress.condB));
+  if (candidatesA.length===0||candidatesB.length===0) {
+    log('ジョグレス条件を満たすデジモンがいません','system'); return;
+  }
+  G._jogressState = { cardId, handIndex, jogress, selA:null, selB:null, candidatesA, candidatesB };
+
+  let html = `<p style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">
+    ジョグレス条件：${jogress.condA}（上）＋${jogress.condB}（下）</p>`;
+  html += `<div style="margin-bottom:8px;"><div style="font-size:9px;color:var(--text-dim);margin-bottom:4px;">⬆ 上になる側（${jogress.condA}）</div>`;
+  for (const i of candidatesA) {
+    html += `<button class="modal-btn" id="jgA_${i.instanceId}" onclick="selectJogressA('${i.instanceId}')">
+      ${getCard(i.cardId)?.name}</button>`;
+  }
+  html += `</div><div><div style="font-size:9px;color:var(--text-dim);margin-bottom:4px;">⬇ 下になる側（${jogress.condB}）</div>`;
+  for (const i of candidatesB) {
+    html += `<button class="modal-btn" id="jgB_${i.instanceId}" onclick="selectJogressB('${i.instanceId}')">
+      ${getCard(i.cardId)?.name}</button>`;
+  }
+  html += `</div><div class="modal-action-row" style="margin-top:10px;">
+    <button class="modal-btn warn" id="jg-confirm" onclick="confirmJogress()" disabled>ジョグレス</button>
+    <button class="modal-btn" onclick="closeModal()">キャンセル</button>
+  </div>`;
+  openModal(`ジョグレス: ${card.name}`, html);
+}
+
+function selectJogressA(iid) {
+  const st = G._jogressState;
+  if (!st) return;
+  if (st.selA) document.getElementById(`jgA_${st.selA}`)?.classList.remove('primary');
+  st.selA = iid;
+  document.getElementById(`jgA_${iid}`)?.classList.add('primary');
+  if (st.selA && st.selB) document.getElementById('jg-confirm').disabled = false;
+}
+
+function selectJogressB(iid) {
+  const st = G._jogressState;
+  if (!st) return;
+  if (st.selB) document.getElementById(`jgB_${st.selB}`)?.classList.remove('primary');
+  st.selB = iid;
+  document.getElementById(`jgB_${iid}`)?.classList.add('primary');
+  if (st.selA && st.selB) document.getElementById('jg-confirm').disabled = false;
+}
+
+function confirmJogress() {
+  const st = G._jogressState;
+  if (!st || !st.selA || !st.selB) return;
+  const { cardId, handIndex, jogress } = st;
+  const newCard = getCard(cardId);
+  const instA = G.myBattleArea.find(i=>i.instanceId===st.selA);
+  const instB = G.myBattleArea.find(i=>i.instanceId===st.selB);
+  if (!instA||!instB) return;
+
+  if (!canAfford(jogress.cost)) { log(`コスト不足（必要:${jogress.cost}）`,'system'); return; }
+
+  G.myHand.splice(handIndex,1);
+  // instBの進化元 + instB + instAの進化元 の順でinstAのスタックに
+  instA.stack = [...instB.stack, instB.cardId, ...instA.stack];
+  G.myBattleArea = G.myBattleArea.filter(i=>i.instanceId!==st.selB);
+
+  instA.stack.push(instA.cardId);
+  instA.cardId = cardId;
+  instA.isJogressed = true;
+  instA.tempKeywords=[]; instA.tempDP=0; instA.tempSatk=0; instA.thisTurnDP=0;
+
+  spendMemory(jogress.cost);
+  closeModal();
+  G._jogressState = null;
+  log(`⬆ ジョグレス！${newCard.name} に進化！`, 'evolve');
+  if (G.myDeck.length>0) {
+    const dId=G.myDeck.pop(); G.myHand.push(dId);
+    log(`　→ 進化時ドロー: ${getCard(dId)?.name}`,'system');
+  }
+  G.lastEvolvedInstId = instA.instanceId;
+  triggerEffect(instA,'進化時',G.myBattleArea,G.myTrash);
+  collectSpecialTriggerEffects('onMyDigimonEvolved', instA, newCard.name)
+    .forEach(e=>enqueueEffect(e.label,e.inst,e.actions,e.actionText));
+  render(); checkTurnEnd();
+}
+
+// ===================================================
+// フェーズ3：アプ合体
+// ===================================================
+
+function parseAppCombine(evocostText) {
+  const match = evocostText.match(/アプ合体[〕：:](.+?)(?:[：::]コスト(\d+))?$/);
+  if (!match) return null;
+  const names = match[1].split(/[＆&]/).map(s=>s.replace(/「|」/g,'').trim());
+  return { names, cost: parseInt(match[2]||'0') };
+}
+
+function openAppCombineModal(cardId, handIndex) {
+  const card = getCard(cardId);
+  const combine = parseAppCombine(card._evocost_text||'');
+  if (!combine) return;
+  // 全員バトルエリアにいるか確認
+  const missing = combine.names.filter(n=>
+    !G.myBattleArea.some(i=>(getCard(i.cardId)?.name||'').includes(n))
+  );
+  if (missing.length>0) {
+    log(`アプ合体条件不足: ${missing.join('、')} がいません`,'system'); return;
+  }
+  G._appCombineState = { cardId, handIndex, combine };
+  let html = `<p style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">
+    アプ合体：${combine.names.join('＆')}（コスト${combine.cost}）</p>`;
+  html += `<div class="modal-action-row">
+    <button class="modal-btn warn" onclick="confirmAppCombine()">アプ合体</button>
+    <button class="modal-btn" onclick="closeModal()">キャンセル</button>
+  </div>`;
+  openModal(`アプ合体: ${card.name}`, html);
+}
+
+function confirmAppCombine() {
+  const st = G._appCombineState;
+  if (!st) return;
+  const { cardId, handIndex, combine } = st;
+  const newCard = getCard(cardId);
+  if (!canAfford(combine.cost)) { log(`コスト不足`,'system'); return; }
+
+  G.myHand.splice(handIndex,1);
+  // 最初の条件のデジモンをベースにして他を進化元に
+  const baseInst = G.myBattleArea.find(i=>(getCard(i.cardId)?.name||'').includes(combine.names[0]));
+  for (let n=1; n<combine.names.length; n++) {
+    const ti = G.myBattleArea.find(i=>(getCard(i.cardId)?.name||'').includes(combine.names[n]));
+    if (ti) {
+      baseInst.stack = [...ti.stack, ti.cardId, ...baseInst.stack];
+      G.myBattleArea = G.myBattleArea.filter(i=>i.instanceId!==ti.instanceId);
+    }
+  }
+  baseInst.stack.push(baseInst.cardId);
+  baseInst.cardId = cardId;
+  baseInst.tempKeywords=[]; baseInst.tempDP=0;
+
+  spendMemory(combine.cost);
+  closeModal(); G._appCombineState=null;
+  log(`⬆ アプ合体！${newCard.name} に進化！`,'evolve');
+  if (G.myDeck.length>0) {
+    const dId=G.myDeck.pop(); G.myHand.push(dId);
+    log(`　→ 進化時ドロー: ${getCard(dId)?.name}`,'system');
+  }
+  G.lastEvolvedInstId = baseInst.instanceId;
+  triggerEffect(baseInst,'進化時',G.myBattleArea,G.myTrash);
+  render(); checkTurnEnd();
+}
+
+// ===================================================
+// フェーズ3：リンク
+// ===================================================
+
+function openLinkModal(instId) {
+  const inst = G.myBattleArea.find(i=>i.instanceId===instId);
+  if (!inst) return;
+  const c = getCard(inst.cardId);
+  // 既にリンク中
+  if (inst.linkCard) {
+    const lc = getCard(inst.linkCard.cardId);
+    let html = `<p style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">
+      現在のリンク: ${lc?.name}（DP+${inst.linkCard.dpBonus}）</p>`;
+    html += `<div class="modal-action-row">
+      <button class="modal-btn warn" onclick="unlinkCard('${instId}')">リンク解除</button>
+      <button class="modal-btn" onclick="closeModal()">キャンセル</button>
+    </div>`;
+    openModal(`リンク管理: ${c?.name}`, html); return;
+  }
+  // 手札のリンクカードを一覧
+  const linkCards = G.myHand.map((cId,idx)=>({cId,idx}))
+    .filter(({cId})=>getCard(cId)?._effect_text?.includes('リンク'));
+  if (linkCards.length===0) { log('手札にリンクカードがありません','system'); return; }
+  let html = `<p style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">
+    リンクするカードを選んでください</p>`;
+  for (const {cId,idx} of linkCards) {
+    const lc = getCard(cId);
+    const costM = (lc?._effect_text||'').match(/リンクコスト(\d+)/);
+    const cost = costM ? parseInt(costM[1]) : 0;
+    html += `<button class="modal-btn primary" onclick="confirmLinkCard('${instId}','${cId}',${idx},${cost})">
+      ${lc?.name}（コスト${cost}）</button>`;
+  }
+  html += `<button class="modal-btn" onclick="closeModal()">キャンセル</button>`;
+  openModal(`リンク: ${c?.name}`, html);
+}
+
+function confirmLinkCard(instId, linkCardId, handIndex, cost) {
+  const inst = G.myBattleArea.find(i=>i.instanceId===instId);
+  if (!inst) return;
+  if (!canAfford(cost)) { log(`コスト不足（必要:${cost}）`,'system'); return; }
+  const lc = getCard(linkCardId);
+  const dpM = (lc?._effect_text||'').match(/DP[+＋](\d+)/);
+  const dpBonus = dpM ? parseInt(dpM[1])*(dpM[1].length<=2?1000:1) : 0;
+  G.myHand.splice(handIndex,1);
+  inst.linkCard = { cardId:linkCardId, dpBonus };
+  spendMemory(cost);
+  closeModal();
+  log(`🔗 ${lc?.name} を ${getCard(inst.cardId)?.name} にリンク！（DP+${dpBonus}）`,'important');
+  triggerEffect(inst,'リンク時',G.myBattleArea,G.myTrash);
+  render(); checkTurnEnd();
+}
+
+function unlinkCard(instId) {
+  const inst = G.myBattleArea.find(i=>i.instanceId===instId);
+  if (!inst?.linkCard) return;
+  const lc = getCard(inst.linkCard.cardId);
+  G.myTrash.push(inst.linkCard.cardId);
+  inst.linkCard = null;
+  closeModal();
+  log(`🔓 ${lc?.name} のリンクを解除（トラッシュへ）`,'system');
+  render();
+}
+
+// ===================================================
+// フェーズ3：セーブ
+// ===================================================
+
+function activateSave(inst) {
+  const tamers = G.myBattleArea.filter(i=>getCard(i.cardId)?.type==='テイマー');
+  if (tamers.length===0) { return false; } // テイマーなし→通常トラッシュ
+  if (tamers.length===1) {
+    tamers[0].savedCards.push(inst.cardId);
+    log(`💾 ${getCard(inst.cardId)?.name} をセーブ（${getCard(tamers[0].cardId)?.name}の下）`,'important');
+    return true;
+  }
+  // 複数テイマーがいる場合は選択
+  let html = `<p style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">
+    セーブ先のテイマーを選んでください</p>`;
+  for (const t of tamers) {
+    html += `<button class="modal-btn primary" onclick="confirmSaveTamer('${t.instanceId}','${inst.instanceId}')">
+      ${getCard(t.cardId)?.name}（セーブ${t.savedCards.length}枚）</button>`;
+  }
+  openModal('セーブ先選択', html);
+  return true;
+}
+
+function confirmSaveTamer(tamerInstId, savedInstId) {
+  const tamer = G.myBattleArea.find(i=>i.instanceId===tamerInstId);
+  // savedInstIdは消滅済みなのでcardIdを別途保持している想定
+  // destroyDigimon内から呼ばれる際にcardIdを渡す
+  closeModal();
+  if (tamer && G._pendingSaveCardId) {
+    tamer.savedCards.push(G._pendingSaveCardId);
+    log(`💾 ${getCard(G._pendingSaveCardId)?.name} をセーブ`,'important');
+    G._pendingSaveCardId = null;
+  }
+  render();
+}
+
+// ===================================================
+// フェーズ3：デジバースト（進化元破棄版）
+// ===================================================
+
+function activateDigiburst(inst, cost, afterActions) {
+  if ((inst.stack?.length||0) < cost) {
+    log(`進化元が${cost}枚未満のため発動できません`,'system'); return;
+  }
+  for (let i=0; i<cost; i++) {
+    const srcId = inst.stack.shift(); // 一番下から破棄（消滅時効果なし）
+    G.myTrash.push(srcId);
+    log(`　→ 進化元 ${getCard(srcId)?.name||srcId} を破棄`,'system');
+  }
+  log(`💥 デジバースト${cost}発動！`,'important');
+  if (afterActions?.length>0) resolveStructuredActions(inst, afterActions);
+  render();
+}
+
+// ===================================================
+// フェーズ3残り：セキュリティ表向き管理
+// ===================================================
+
+// G.mySecurityFaceUp = Set<index> で表向きのセキュリティインデックスを管理
+// initGameState内でも初期化済み
+
+function placeFaceUpSecurity(cardId) {
+  // セキュリティの下に表向きで置く
+  if (!G.mySecurityFaceUp) G.mySecurityFaceUp = new Set();
+  G.mySecurity.unshift(cardId); // 下に置く（インデックス0が下）
+  G.mySecurityFaceUp.add(0);
+  // 他のインデックスを1つずつずらす
+  const newSet = new Set();
+  for (const idx of G.mySecurityFaceUp) newSet.add(idx === 0 ? 0 : idx + 1);
+  G.mySecurityFaceUp = newSet;
+  log(`　→ ${getCard(cardId)?.name} をセキュリティの下に表向きで置きました`, 'important');
+  render();
+}
+
+function isSecurityFaceUp(index) {
+  return G.mySecurityFaceUp?.has(index) || false;
+}
+
+// 表向きセキュリティをチェックしたときのトリガー（BT20-005等）
+function checkFaceUpSecurityTrigger(checkedIndex) {
+  if (!isSecurityFaceUp(checkedIndex)) return;
+  const triggered = collectSpecialTriggerEffects('onFaceUpSecurityChecked');
+  if (triggered.length > 0) enqueueSimultaneous(triggered);
+}
+
+// ===================================================
+// フェーズ3残り：マインドリンク
+// ===================================================
+// マインドリンク：テイマーとデジモンを繋ぐ
+// inst.mindLink = { tamerInstId } として管理
+// マインドリンク中はテイマーのレスト効果・コスト効果をデジモンが使える
+
+function openMindLinkModal(instId) {
+  const inst = G.myBattleArea.find(i=>i.instanceId===instId);
+  if (!inst) return;
+  if (inst.mindLink) {
+    const t = G.myBattleArea.find(i=>i.instanceId===inst.mindLink.tamerInstId);
+    openModal('マインドリンク解除', `<p style="font-size:11px;color:var(--text-dim);margin-bottom:10px;">
+      ${getCard(t?.cardId)?.name||'?'} とのマインドリンクを解除しますか？</p>
+      <div class="modal-action-row">
+        <button class="modal-btn warn" onclick="confirmMindUnlink('${instId}')">解除</button>
+        <button class="modal-btn" onclick="closeModal()">キャンセル</button>
+      </div>`);
+    return;
+  }
+  // マインドリンク先のテイマーを選択
+  const tamers = G.myBattleArea.filter(i=>getCard(i.cardId)?.type==='テイマー');
+  if (tamers.length===0) { log('テイマーがいません','system'); return; }
+  let html = `<p style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">マインドリンクするテイマーを選んでください</p>`;
+  for (const t of tamers) {
+    html += `<button class="modal-btn primary" onclick="confirmMindLink('${instId}','${t.instanceId}')">
+      ${getCard(t.cardId)?.name}</button>`;
+  }
+  html += `<button class="modal-btn" onclick="closeModal()">キャンセル</button>`;
+  openModal('マインドリンク', html);
+}
+
+function confirmMindLink(instId, tamerInstId) {
+  const inst = G.myBattleArea.find(i=>i.instanceId===instId);
+  const tamer = G.myBattleArea.find(i=>i.instanceId===tamerInstId);
+  if (!inst||!tamer) return;
+  inst.mindLink = { tamerInstId };
+  tamer.mindLinkedTo = instId;
+  closeModal();
+  log(`🧠 ${getCard(inst.cardId)?.name} と ${getCard(tamer.cardId)?.name} がマインドリンク！`,'important');
+  render();
+}
+
+function confirmMindUnlink(instId) {
+  const inst = G.myBattleArea.find(i=>i.instanceId===instId);
+  if (!inst?.mindLink) return;
+  const tamer = G.myBattleArea.find(i=>i.instanceId===inst.mindLink.tamerInstId);
+  if (tamer) tamer.mindLinkedTo = null;
+  inst.mindLink = null;
+  closeModal();
+  log(`🧠 マインドリンク解除`,'system');
+  render();
+}
+
+// ===================================================
+// フェーズ3残り：進化元にある特定カードの効果全てを得る
+// ===================================================
+
+function getInheritedSourceEffects(inst) {
+  // 「このデジモンの進化元にある〜の効果全てを得る」パターンを処理
+  const card = getCard(inst.cardId);
+  const effText = card?._effect_text || '';
+  const m = effText.match(/進化元にある(?:名称に)?「([^」]+)」(?:と「([^」]+)」)?(?:を含む)?カードの効果全てを得る/);
+  if (!m) return [];
+  const targetNames = [m[1], m[2]].filter(Boolean);
+  const inherited = [];
+  for (const srcId of (inst.stack||[])) {
+    const srcCard = getCard(srcId);
+    if (!srcCard) continue;
+    if (!targetNames.some(n=>(srcCard.name||'').includes(n))) continue;
+    // 該当カードの通常効果ブロックを付与
+    const blocks = srcCard._parsed_effects?.length > 0
+      ? srcCard._parsed_effects
+      : splitAndParseEffects(srcCard._effect_text||'');
+    for (const block of blocks) {
+      inherited.push({ sourceCard: srcCard, block });
+    }
+  }
+  return inherited;
+}
+
+// collectSpecialTriggerEffects内で呼ぶ（既存関数に追記）
+// → 進化元継承効果も収集する
+function collectInheritedSourceEffects(triggerId, inst) {
+  const inherited = getInheritedSourceEffects(inst);
+  const collected = [];
+  for (const { sourceCard, block } of inherited) {
+    if (block.specialTrigger !== triggerId) continue;
+    collected.push({
+      label: `${sourceCard.name}【進化元継承】`,
+      inst,
+      actions: block.actions||[],
+      actionText: block.actionText,
+      block,
+    });
+  }
+  return collected;
+}
+
+// ===================================================
+// フェーズ3残り：BT10-112（置いたカードの進化時効果を発揮）
+// ===================================================
+
+function activatePlacedCardEvoEffect(inst, placedCardId) {
+  const placedCard = getCard(placedCardId);
+  if (!placedCard) return;
+  // 置いたカードの進化時効果ブロックを取得
+  const blocks = (placedCard._parsed_effects||[]).filter(b=>b.triggers.includes('進化時'));
+  if (blocks.length===0) { log(`${placedCard.name} に進化時効果がありません`,'system'); return; }
+  if (blocks.length===1) {
+    log(`　→ ${placedCard.name} の進化時効果を発揮！`,'important');
+    resolveStructuredActions(inst, blocks[0].actions||[]);
+    return;
+  }
+  // 複数の進化時効果がある場合は選択
+  let html = `<p style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">
+    ${placedCard.name} の進化時効果を1つ選んでください</p>`;
+  html += `<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
+  for (let i=0; i<blocks.length; i++) {
+    html += `<button class="modal-btn primary"
+      onclick="confirmPlacedEvoEffect('${inst.instanceId}','${placedCardId}',${i})">
+      ${blocks[i].actionText?.slice(0,30)||`効果${i+1}`}</button>`;
+  }
+  html += `<button class="modal-btn" onclick="closeModal()">スキップ</button></div>`;
+  openModal(`進化時効果を選択`, html);
+}
+
+function confirmPlacedEvoEffect(instId, cardId, blockIndex) {
+  const inst = G.myBattleArea.find(i=>i.instanceId===instId);
+  if (!inst) { closeModal(); return; }
+  const blocks = (getCard(cardId)?._parsed_effects||[]).filter(b=>b.triggers.includes('進化時'));
+  const block = blocks[blockIndex];
+  closeModal();
+  if (block) {
+    log(`　→ 進化時効果を発揮！`,'important');
+    resolveStructuredActions(inst, block.actions||[]);
+  }
+}
+
 window.onload = function() {
   const params = new URLSearchParams(window.location.search);
   if (params.get('mode') === 'double') {
@@ -10693,6 +11377,8 @@ window.onload = function() {
 .fd-destroy-battle { background:rgba(224,80,80,0.7); color:#fff; }
 .fd-destroy-effect { background:rgba(160,80,224,0.7); color:#fff; }
 .fd-destroy-rule   { background:rgba(100,100,100,0.7); color:#fff; }
+
+@media (max-width:768px) and (orientation:portrait) {
   #double-app::after {
     content:'📱 横向きにしてください';
     position:fixed; inset:0; background:var(--bg-dark);
