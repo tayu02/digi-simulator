@@ -3563,7 +3563,12 @@ function doDrawPhase() {
   G.phase="hatching"; G.hatchingDone=false;
   updatePhaseButtons();
   render();
-  log("【育成フェイズ】育成ボタンを押してください","system");
+  // ダブルモードでは育成フェイズをスキップしてメインへ自動移行
+  if (G_isDoubleMode) {
+    setTimeout(()=>advanceToMain(), 300);
+  } else {
+    log("【育成フェイズ】育成ボタンを押してください","system");
+  }
 }
 
 function updatePhaseButtons() {
@@ -7029,7 +7034,9 @@ function openAdditionalAttackModal(target) {
 // アタック処理
 // ===================================================
 function openAttackModal(instId) {
-  if (!G.isMyTurn||G.phase!=="main") { log("メインフェイズ以外ではアタックできません","system"); return; }
+  if (!G.isMyTurn || (G.phase !== 'main' && !G_isDoubleMode)) {
+    log("メインフェイズ以外ではアタックできません","system"); return;
+  }
   const inst = G.myBattleArea.find(i=>i.instanceId===instId);
   if (!inst) return;
   const card = getCard(inst.cardId);
@@ -9857,15 +9864,24 @@ function renderDoubleSide(side, state) {
 
   // デジタマ枚数
   const tamagoEl = document.getElementById(`${prefix}-tamago`);
-  if (tamagoEl) tamagoEl.textContent = (state.myTamagoDeck||[]).length;
+  if (tamagoEl) {
+    tamagoEl.textContent = (state.myTamagoDeck||[]).length;
+    if (isActive) {
+      tamagoEl.closest('.d-small-box').onclick = () => hatchTamago(true);
+    }
+  }
 
   // 育成エリア
+  const breedBox = document.getElementById(`${prefix}-breed-box`);
   const breedName = document.getElementById(`${prefix}-breed-name`);
   if (breedName) {
     if (state.myBreeding) {
       const c = getCard(state.myBreeding.cardId);
       breedName.textContent = (c?.name||'?').slice(0,6);
       breedName.style.color = color;
+      if (isActive && breedBox) {
+        breedBox.onclick = () => openDoubleBreedingModal();
+      }
     } else {
       breedName.textContent = '空';
       breedName.style.color = 'var(--text-dim)';
@@ -9874,11 +9890,21 @@ function renderDoubleSide(side, state) {
 
   // デッキ枚数
   const deckEl = document.getElementById(`${prefix}-deck`);
-  if (deckEl) deckEl.textContent = (state.myDeck||[]).length;
+  if (deckEl) {
+    deckEl.textContent = (state.myDeck||[]).length;
+    if (isActive) {
+      deckEl.closest('.d-small-box').onclick = () => openDoubleDeckModal();
+    }
+  }
 
   // トラッシュ枚数
   const trashEl = document.getElementById(`${prefix}-trash`);
-  if (trashEl) trashEl.textContent = (state.myTrash||[]).length;
+  if (trashEl) {
+    trashEl.textContent = (state.myTrash||[]).length;
+    if (isActive) {
+      trashEl.closest('.d-small-box').onclick = () => openDoubleTrashModal();
+    }
+  }
 
   // バトルエリア
   const battleEl = document.getElementById(`${prefix}-battle`);
@@ -9949,17 +9975,198 @@ function openDoubleHandCardModal(cardId, handIndex, state) {
 function openDoubleBattleCardModal(inst, state) {
   const card = getCard(inst.cardId);
   if (!card) return;
-  let html = `<p style="font-size:13px;font-weight:700;color:var(--text-bright);margin-bottom:8px;">${card.name}</p>`;
-  html += `<p style="font-size:11px;color:var(--text-dim);margin-bottom:12px;">DP: ${getDP(inst).toLocaleString()} / Lv.${card.level||'?'}</p>`;
-  html += `<div class="modal-action-row" style="flex-direction:column;gap:6px;">`;
+  const dp = getDP(inst);
+  let html = `<p style="font-size:13px;font-weight:700;color:var(--text-bright);margin-bottom:4px;">${card.name}</p>`;
+  html += `<p style="font-size:10px;color:var(--text-dim);margin-bottom:8px;">
+    DP:${dp.toLocaleString()} / Lv.${card.level||'?'} / 進化元${inst.stack.length}枚</p>`;
+  html += `<div class="modal-action-row" style="flex-direction:column;gap:5px;">`;
   // アタック
-  if (!inst.isRested && !inst.usedThisTurn && G.phase === 'main') {
+  if (!inst.isRested && !inst.usedThisTurn) {
     html += `<button class="modal-btn warn" onclick="closeModal();openAttackModal('${inst.instanceId}')">
-      アタック</button>`;
+      ⚔ アタック</button>`;
   }
-  // メイン効果
-  html += `<button class="modal-btn" onclick="closeModal();openDigimonDetailModal('${inst.instanceId}')">
-    効果・詳細</button>`;
+  // レスト/アクティブ
+  if (inst.isRested) {
+    html += `<button class="modal-btn" onclick="closeModal();${inst.instanceId}_activate()">
+      ▶ アクティブ</button>`;
+    // インライン関数代わりにグローバル関数呼び出し
+    html = html.replace(`${inst.instanceId}_activate()`, `doDoubleActivate('${inst.instanceId}')`);
+  } else {
+    html += `<button class="modal-btn" onclick="closeModal();doDoubleRest('${inst.instanceId}')">
+      ↩ レスト</button>`;
+  }
+  // 効果発動（メイン効果）
+  html += `<button class="modal-btn primary" onclick="closeModal();openDoubleEffectModal('${inst.instanceId}')">
+    ✨ 効果を発動</button>`;
+  // 進化元を見る
+  if (inst.stack.length > 0) {
+    html += `<button class="modal-btn" onclick="closeModal();openDoubleStackModal('${inst.instanceId}')">
+      📚 進化元を見る</button>`;
+  }
+  // フリーダブル時の消滅ボタン
+  if (G_isFreeDouble) {
+    html += `<button class="fd-destroy-btn fd-destroy-battle" style="font-size:10px;padding:4px;"
+      onclick="closeModal();fdDestroyDigimon('${inst.instanceId}','battle')">💀 バトル消滅</button>`;
+    html += `<button class="fd-destroy-btn fd-destroy-effect" style="font-size:10px;padding:4px;"
+      onclick="closeModal();fdDestroyDigimon('${inst.instanceId}','effect')">💀 効果消滅</button>`;
+    html += `<button class="fd-destroy-btn fd-destroy-rule" style="font-size:10px;padding:4px;"
+      onclick="closeModal();fdDestroyDigimon('${inst.instanceId}','rule')">💀 ルール消滅</button>`;
+  }
+  html += `<button class="modal-btn" onclick="closeModal()">キャンセル</button></div>`;
+  openModal(card.name, html);
+}
+
+// ダブルモード：アクティブにする
+// ダブルモード：デッキ操作モーダル
+function openDoubleDeckModal() {
+  let html = `<div class="modal-action-row" style="flex-direction:column;gap:5px;">
+    <button class="modal-btn primary" onclick="closeModal();drawCard()">📤 ドロー（1枚）</button>
+    <button class="modal-btn" onclick="closeModal();drawCard(5)">📤 5枚ドロー</button>
+    <button class="modal-btn" onclick="closeModal();openDeckTopModal()">🔍 デッキトップを見る</button>
+    <button class="modal-btn warn" onclick="closeModal();shuffle(G.myDeck);render();log('デッキをシャッフルしました','system')">🔀 シャッフル</button>
+    <button class="modal-btn" onclick="closeModal()">キャンセル</button>
+  </div>`;
+  openModal(`デッキ（${G.myDeck.length}枚）`, html);
+}
+
+// ダブルモード：トラッシュモーダル
+function openDoubleTrashModal() {
+  if (G.myTrash.length===0) { log('トラッシュにカードがありません','system'); return; }
+  let html = `<div style="max-height:300px;overflow-y:auto;display:flex;flex-direction:column;gap:3px;">`;
+  const unique = [...new Set(G.myTrash)];
+  for (const cId of unique.slice(-20).reverse()) {
+    const c = getCard(cId);
+    html += `<div style="background:var(--bg-card);border-radius:4px;padding:5px 8px;
+      display:flex;justify-content:space-between;align-items:center;">
+      <span style="font-size:11px;color:var(--text-bright);">${c?.name||cId}</span>
+      <button class="modal-btn" style="font-size:9px;padding:2px 6px;"
+        onclick="returnFromTrash('${cId}')">手札に</button>
+    </div>`;
+  }
+  html += `</div>`;
+  html += `<button class="modal-btn" style="margin-top:8px;" onclick="closeModal()">閉じる</button>`;
+  openModal(`トラッシュ（${G.myTrash.length}枚）`, html);
+}
+
+// ダブルモード：育成エリアモーダル
+function openDoubleBreedingModal() {
+  if (!G.myBreeding) return;
+  const c = getCard(G.myBreeding.cardId);
+  const dp = getDP(G.myBreeding);
+  let html = `<p style="font-size:12px;font-weight:700;color:var(--text-bright);margin-bottom:4px;">${c?.name}</p>`;
+  html += `<p style="font-size:10px;color:var(--text-dim);margin-bottom:10px;">
+    DP:${dp.toLocaleString()} / Lv.${c?.level||'?'}</p>`;
+  html += `<div class="modal-action-row" style="flex-direction:column;gap:5px;">`;
+  // バトルエリアへ移動
+  if ((c?.level||0)>=3) {
+    html += `<button class="modal-btn warn" onclick="closeModal();moveBreedingToBattle()">
+      ▶ バトルエリアへ</button>`;
+  }
+  // 進化
+  html += `<button class="modal-btn primary" onclick="closeModal();openBreedingEvoSelect()">
+    ⬆ 育成エリアで進化</button>`;
+  // 効果発動
+  html += `<button class="modal-btn" onclick="closeModal();openDoubleBreedingEffectModal()">
+    ✨ 効果を発動</button>`;
+  html += `<button class="modal-btn" onclick="closeModal()">キャンセル</button></div>`;
+  openModal('育成エリア', html);
+}
+
+function openDoubleBreedingEffectModal() {
+  if (!G.myBreeding) return;
+  const inst = G.myBreeding;
+  const card = getCard(inst.cardId);
+  const blocks = card?._parsed_effects?.length > 0
+    ? card._parsed_effects
+    : splitAndParseEffects(card?._effect_text||'');
+  if (blocks.length===0) { log('効果がありません','system'); return; }
+  let html = `<div class="modal-action-row" style="flex-direction:column;gap:5px;">`;
+  for (const block of blocks) {
+    html += `<button class="modal-btn primary" onclick="closeModal();doubleFireBlock('${inst.instanceId}',${JSON.stringify(block.actions||[]).replace(/"/g,"'")})">
+      ${block.actionText?.slice(0,30)||'効果発動'}</button>`;
+  }
+  html += `<button class="modal-btn" onclick="closeModal()">キャンセル</button></div>`;
+  openModal(`${card?.name} の効果`, html);
+}
+
+function openBreedingEvoSelect() {
+  // 育成エリアのデジモンに対して手札から進化先を選ぶ
+  if (!G.myBreeding) return;
+  const candidates = G.myHand.map((cId,idx)=>({cId,idx}))
+    .filter(({cId})=>canEvolveOnto(getCard(cId), G.myBreeding).length>0);
+  if (candidates.length===0) { log('進化できるカードが手札にありません','system'); return; }
+  let html = `<div class="modal-action-row" style="flex-direction:column;gap:5px;">`;
+  for (const {cId,idx} of candidates) {
+    const c = getCard(cId);
+    const cost = Math.min(...canEvolveOnto(c,G.myBreeding).map(r=>r.evo.cost));
+    html += `<button class="modal-btn primary" onclick="confirmEvolve('${cId}',${idx},'breeding',${cost})">
+      ${c?.name}（コスト${cost}）</button>`;
+  }
+  html += `<button class="modal-btn" onclick="closeModal()">キャンセル</button></div>`;
+  openModal('育成エリアで進化', html);
+}
+
+function doDoubleActivate(instId) {
+  const inst = G.myBattleArea.find(i=>i.instanceId===instId);
+  if (inst) { inst.isRested = false; render(); }
+}
+
+// ダブルモード：レスト
+function doDoubleRest(instId) {
+  const inst = G.myBattleArea.find(i=>i.instanceId===instId);
+  if (inst) { inst.isRested = true; render(); }
+}
+
+// ダブルモード：効果発動モーダル
+function openDoubleEffectModal(instId) {
+  const inst = G.myBattleArea.find(i=>i.instanceId===instId);
+  if (!inst) return;
+  const card = getCard(inst.cardId);
+  const blocks = card?._parsed_effects?.length > 0
+    ? card._parsed_effects
+    : splitAndParseEffects(card?._effect_text||'');
+  const mainBlocks = blocks.filter(b=>b.triggers.includes('メイン')||b.triggers.includes('お互いのターン'));
+  if (mainBlocks.length===0) { log('手動発動できる効果がありません','system'); return; }
+  let html = `<div class="modal-action-row" style="flex-direction:column;gap:5px;">`;
+  for (const block of mainBlocks) {
+    html += `<button class="modal-btn primary" onclick="closeModal();doubleFireBlock('${instId}',${JSON.stringify(block.actions||[]).replace(/"/g,"'")})">
+      ${block.actionText?.slice(0,30)||'効果発動'}</button>`;
+  }
+  html += `<button class="modal-btn" onclick="closeModal()">キャンセル</button></div>`;
+  openModal(`${card?.name} の効果`, html);
+}
+
+function doubleFireBlock(instId, actionsJson) {
+  const inst = G.myBattleArea.find(i=>i.instanceId===instId);
+  if (!inst) return;
+  let actions = [];
+  try { actions = JSON.parse(actionsJson.replace(/'/g,'"')); } catch(e) {}
+  resolveStructuredActions(inst, actions);
+}
+
+// ダブルモード：進化元を見るモーダル
+function openDoubleStackModal(instId) {
+  const inst = G.myBattleArea.find(i=>i.instanceId===instId);
+  if (!inst) return;
+  let html = `<div style="display:flex;flex-direction:column;gap:4px;max-height:300px;overflow-y:auto;">`;
+  for (let i=inst.stack.length-1; i>=0; i--) {
+    const c = getCard(inst.stack[i]);
+    html += `<div style="background:var(--bg-card);border-radius:5px;padding:6px 8px;font-size:11px;">
+      <span style="color:var(--text-bright);">${c?.name||inst.stack[i]}</span>
+      <span style="color:var(--text-dim);font-size:9px;margin-left:6px;">Lv.${c?.level||'?'}</span>
+    </div>`;
+  }
+  html += `</div><button class="modal-btn" style="margin-top:8px;" onclick="closeModal()">閉じる</button>`;
+  openModal('進化元スタック', html);
+}
+
+function openDoubleBattleCardModal(inst, state) {
+  const card = getCard(inst.cardId);
+  if (!card) return;
+  const dp = getDP(inst);
+  let html = `<p style="font-size:13px;font-weight:700;color:var(--text-bright);margin-bottom:4px;">${card.name}</p>`;
+  html += `<p style="font-size:10px;color:var(--text-dim);margin-bottom:8px;">
+    DP:${dp.toLocaleString()} / Lv.${card.level||'?'} / 進化元${inst.stack.length}枚</p>`;
   html += `<button class="modal-btn" onclick="closeModal()">キャンセル</button></div>`;
   openModal(card.name, html);
 }
