@@ -1305,6 +1305,40 @@ function checkCondition(condition, inst) {
     }
     case "name_contains":
       return true; // 呼び出し元でカード名と比較
+    // このデジモンが登場時効果を持つ
+    case "self_has_played_effect": {
+      if (!inst) return false;
+      const c = getCard(inst.cardId);
+      const blocks = c?._parsed_effects || [];
+      return blocks.some(b=>b.triggers?.includes('登場時'));
+    }
+    // 自分のテイマーがいる/N体以上
+    case "my_tamer_exists": {
+      const tamerCount = G.myBattleArea.filter(i=>getCard(i.cardId)?.type==='テイマー').length;
+      const need = condition.count || 1;
+      return tamerCount >= need;
+    }
+    // 自分のデジモンがN体以上
+    case "my_digimon_count": {
+      const dCount = G.myBattleArea.filter(i=>getCard(i.cardId)?.type==='デジモン').length;
+      return dCount >= (condition.count || 1);
+    }
+    // 進化元にテイマーカードがある
+    case "source_has_tamer": {
+      if (!inst) return false;
+      return (inst.stack||[]).some(cId=>getCard(cId)?.type==='テイマー');
+    }
+    // このデジモンがアタック中
+    case "is_attacking": {
+      return !!inst?._attackTarget;
+    }
+    // 相手のデジモンのDP条件
+    case "opp_dp": {
+      const oppDps = G.oppBattleArea.map(i=>getDP(i));
+      if (oppDps.length===0) return false;
+      const maxDp = Math.max(...oppDps);
+      return condition.op==='>=' ? maxDp >= condition.value : maxDp <= condition.value;
+    }
     default:
       return true;
   }
@@ -1484,7 +1518,7 @@ const ACTION_HANDLERS = {
     const addCount = condText.match(/(\d+)枚を手札に加える/) ? 1 : 1;
     // 「残りは破棄する」フラグを設定（オープン済みのためonMyDeckTrashedByEffectは発火しない）
     G._revealDiscardRest = !!(act.discardRest);
-    openRevealModal(inst, act, revealed, addCount, condText);
+    openRevealModal(inst, act, revealed, addCount, condText, act.afterActions||[]);
   },
   // デッキ下に戻す
   "return_to_deck_bottom": (inst, act) => {
@@ -2766,6 +2800,553 @@ const ACTION_HANDLERS = {
     activatePlacedCardEvoEffect(inst, placedCardId);
   },
 
+  // トラッシュからコスト0登場
+  "play_from_trash_free": (inst, act) => {
+    const filter = act.filter || {};
+    const sources = act.fromHand
+      ? [...new Set([...G.myTrash, ...G.myHand])]
+      : [...new Set(G.myTrash)];
+    const candidates = sources.filter(cId => {
+      const c = getCard(cId);
+      if (!c || c.type !== 'デジモン') return false;
+      if (filter.nameContains?.length > 0 && !filter.nameContains.some(n => (c.name||'').includes(n))) return false;
+      if (filter.colors?.length > 0 && !filter.colors.some(col => (c.color||[]).includes(col))) return false;
+      if (filter.level !== undefined && c.level !== filter.level) return false;
+      return true;
+    });
+    if (candidates.length === 0) { log('トラッシュに対象カードがありません', 'system'); return; }
+    if (candidates.length === 1) {
+      executePlayFromTrashFree(candidates[0], act.fromHand); return;
+    }
+    let html = `<p style="color:var(--text-dim);font-size:11px;margin-bottom:8px;">
+      コスト0で登場させるカードを選んでください</p>`;
+    html += `<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
+    for (const cId of candidates) {
+      const c = getCard(cId);
+      html += `<button class="modal-btn primary"
+        onclick="executePlayFromTrashFree('${cId}',${!!act.fromHand})">
+        ${c?.name} (Lv.${c?.level||'?'} DP:${c?.dp?.toLocaleString()||'?'})</button>`;
+    }
+    html += `<button class="modal-btn" onclick="closeModal()">スキップ</button></div>`;
+    openModal('トラッシュから登場', html);
+  },
+
+  // 手札からコスト0登場
+  "play_from_hand_free": (inst, act) => {
+    const filter = act.filter || {};
+    const hand = G.myHand.map((cId,idx)=>({cId,idx}));
+    const trash = act.fromTrash ? G.myTrash.map(cId=>({cId,idx:-1})) : [];
+    const all = [...hand, ...trash];
+    const candidates = all.filter(({cId})=>{
+      const c = getCard(cId);
+      if (!c) return false;
+      const ct = filter.cardType || 'デジモン';
+      if (c.type !== ct) return false;
+      if (filter.nameContains?.length>0 && !filter.nameContains.some(n=>(c.name||'').includes(n))) return false;
+      if (filter.colors?.length>0 && !filter.colors.some(col=>(c.color||[]).includes(col))) return false;
+      if (filter.level !== undefined && c.level !== filter.level) return false;
+      return true;
+    });
+    if (candidates.length===0) { log('手札に対象カードがありません','system'); return; }
+    if (candidates.length===1) { executePlayFromHandFree(candidates[0].cId, candidates[0].idx); return; }
+    let html=`<p style="color:var(--text-dim);font-size:11px;margin-bottom:8px;">コスト0で登場させるカードを選んでください</p>`;
+    html+=`<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
+    for (const {cId,idx} of candidates) {
+      const c=getCard(cId);
+      html+=`<button class="modal-btn primary" onclick="executePlayFromHandFree('${cId}',${idx})">
+        ${c?.name} (Lv.${c?.level||'?'})</button>`;
+    }
+    html+=`<button class="modal-btn" onclick="closeModal()">スキップ</button></div>`;
+    openModal('手札から登場', html);
+  },
+
+  // 相手のセキュリティを破棄
+  "opp_security_trash": (inst, act) => {
+    const count = act.count || 1;
+    const actual = Math.min(count, G.oppSecurity.length);
+    if (actual===0) { log('相手のセキュリティが0枚です','system'); return; }
+    for (let i=0;i<actual;i++) {
+      const cId = G.oppSecurity.pop();
+      G.oppTrash.push(cId);
+      log(`💥 相手のセキュリティ破棄: ${getCard(cId)?.name||cId}`,'important');
+    }
+    syncOppStateToGD(); render();
+  },
+
+  // 相手のデジモンをデッキに戻す（バウンス）
+  "bounce_opp_to_deck": (inst, act) => {
+    const candidates = G.oppBattleArea.filter(i=>{
+      if (!act.maxDP) return true;
+      return getDP(i) <= act.maxDP;
+    });
+    if (candidates.length===0) { log('対象の相手のデジモンがいません','system'); return; }
+    if (candidates.length===1) { executeBounceOppToDeck(candidates[0].instanceId, act.bottom); return; }
+    let html=`<p style="color:var(--text-dim);font-size:11px;margin-bottom:8px;">
+      デッキに戻す相手のデジモンを選んでください${act.maxDP?`（DP${act.maxDP}以下）`:''}</p>`;
+    html+=`<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
+    for (const i of candidates) {
+      const c=getCard(i.cardId);
+      html+=`<button class="modal-btn warn" onclick="executeBounceOppToDeck('${i.instanceId}',${!!act.bottom})">
+        ${c?.name} (DP:${getDP(i).toLocaleString()})</button>`;
+    }
+    html+=`<button class="modal-btn" onclick="closeModal()">スキップ</button></div>`;
+    openModal('相手をデッキに戻す', html);
+  },
+
+  // 相手のデジモンをアクティブにしない
+  "prevent_activate_opp": (inst, act) => {
+    const count = act.count || 1;
+    const candidates = G.oppBattleArea.filter(i=>getCard(i.cardId)?.type==='デジモン');
+    if (candidates.length===0) { log('相手のデジモンがいません','system'); return; }
+    let html=`<p style="color:var(--text-dim);font-size:11px;margin-bottom:8px;">
+      アクティブにならないデジモン${count}体を選んでください</p>`;
+    html+=`<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
+    for (const i of candidates) {
+      const c=getCard(i.cardId);
+      html+=`<button class="modal-btn warn" onclick="executePreventActivate('${i.instanceId}')">
+        ${c?.name} (DP:${getDP(i).toLocaleString()})</button>`;
+    }
+    html+=`<button class="modal-btn" onclick="closeModal()">スキップ</button></div>`;
+    openModal('アクティブにならない対象', html);
+  },
+
+  // 相手のデジモンをアクティブにする
+  "activate_opp_digimon": (inst, act) => {
+    for (const i of G.oppBattleArea) {
+      if (i.isRested) { i.isRested=false; log(`　→ 相手の${getCard(i.cardId)?.name}をアクティブ`,'system'); }
+    }
+    syncOppStateToGD(); render();
+  },
+
+  // ターン終了までキーワード付与
+  "grant_keywords_duration": (inst, act) => {
+    const kws = act.keywords || [];
+    const dur = act.duration || 'this_turn';
+    const target = act.target || 'self';
+    if (target==='self') {
+      if (!inst.grantedStatus) inst.grantedStatus={};
+      for (const kw of kws) inst.grantedStatus[kw] = dur;
+      log(`　→ ${getCard(inst.cardId)?.name}：${kws.join('、')}を付与（${dur}）`,'system');
+      render(); return;
+    }
+    if (target==='my_all') {
+      for (const i of G.myBattleArea) {
+        if (!i.grantedStatus) i.grantedStatus={};
+        for (const kw of kws) i.grantedStatus[kw]=dur;
+      }
+      log(`　→ 自分のデジモン全てに${kws.join('、')}を付与`,'system');
+      render(); return;
+    }
+    // 相手1体選択
+    const candidates = G.oppBattleArea.filter(i=>getCard(i.cardId)?.type==='デジモン');
+    if (candidates.length===0) { log('相手のデジモンがいません','system'); return; }
+    if (candidates.length===1) {
+      const i=candidates[0];
+      if (!i.grantedStatus) i.grantedStatus={};
+      for (const kw of kws) i.grantedStatus[kw]=dur;
+      log(`　→ 相手の${getCard(i.cardId)?.name}に${kws.join('、')}を付与`,'system');
+      syncOppStateToGD(); render(); return;
+    }
+    let html=`<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
+    for (const i of candidates) {
+      const c=getCard(i.cardId);
+      html+=`<button class="modal-btn warn" onclick="executeGrantKwOpp('${i.instanceId}',${JSON.stringify(kws).replace(/"/g,"'")})">
+        ${c?.name}</button>`;
+    }
+    html+=`<button class="modal-btn" onclick="closeModal()">スキップ</button></div>`;
+    openModal(`${kws.join('、')}付与対象`, html);
+  },
+
+  // デッキからコスト0登場
+  "play_from_deck_free": (inst, act) => {
+    const filter = act.filter || {};
+    // デッキをシャッフルして条件に合うカードを探す
+    const found = G.myDeck.findIndex(cId => {
+      const c = getCard(cId);
+      if (!c || c.type !== 'デジモン') return false;
+      if (filter.nameContains?.length>0 && !filter.nameContains.some(n=>(c.name||'').includes(n))) return false;
+      if (filter.level !== undefined && c.level !== filter.level) return false;
+      return true;
+    });
+    if (found < 0) { log('デッキに対象カードがありません','system'); render(); return; }
+    const cardId = G.myDeck.splice(found, 1)[0];
+    const ni = newInstance(cardId); ni.usedThisTurn = true;
+    G.myBattleArea.push(ni);
+    log(`💫 ${getCard(cardId)?.name} をデッキからコスト0で登場！`,'important');
+    triggerEffect(ni,'登場時',G.myBattleArea,G.myTrash);
+    render(); checkTurnEnd();
+  },
+
+  // 進化元の下に置く（効果）
+  "place_under_source": (inst, act) => {
+    // バトルエリアのデジモンを選んで手札のカードをその進化元下に置く
+    if (G.myBattleArea.length===0) { log('バトルエリアにデジモンがいません','system'); return; }
+    if (G.myHand.length===0) { log('手札がありません','system'); return; }
+    let html = `<p style="color:var(--text-dim);font-size:11px;margin-bottom:6px;">進化元の下に置くカードを手札から選んでください</p>`;
+    html += `<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
+    for (let i=0;i<G.myHand.length;i++) {
+      const c = getCard(G.myHand[i]);
+      html += `<button class="modal-btn" onclick="selectPlaceUnderSource(${i})">
+        ${c?.name||G.myHand[i]}</button>`;
+    }
+    html += `<button class="modal-btn" onclick="closeModal()">スキップ</button></div>`;
+    G._placeUnderSourceInst = inst;
+    openModal('進化元の下に置く', html);
+  },
+
+  // セキュリティの上に置く
+  "place_on_security_top": (inst, act) => {
+    const maxLv = act.maxLevel;
+    const cardType = act.cardType || 'デジモン';
+    const candidates = G.myHand.map((cId,idx)=>({cId,idx})).filter(({cId})=>{
+      const c = getCard(cId);
+      if (!c || c.type !== cardType) return false;
+      if (maxLv !== null && (c.level||0) > maxLv) return false;
+      return true;
+    });
+    if (candidates.length===0) { log('手札に対象カードがありません','system'); return; }
+    if (candidates.length===1) { executePlaceOnSecurityTop(candidates[0].cId, candidates[0].idx); return; }
+    let html = `<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
+    for (const {cId,idx} of candidates) {
+      const c = getCard(cId);
+      html += `<button class="modal-btn primary" onclick="executePlaceOnSecurityTop('${cId}',${idx})">
+        ${c?.name} (Lv.${c?.level||'?'})</button>`;
+    }
+    html += `<button class="modal-btn" onclick="closeModal()">スキップ</button></div>`;
+    openModal('セキュリティの上に置く', html);
+  },
+
+  // 相手のデジモンを手札に戻す
+  "bounce_opp_to_hand": (inst, act) => {
+    const candidates = G.oppBattleArea.filter(i=>{
+      if (!act.maxDP) return true;
+      return getDP(i) <= act.maxDP;
+    });
+    if (candidates.length===0) { log('対象の相手のデジモンがいません','system'); return; }
+    if (act.all) {
+      for (const i of [...candidates]) {
+        for (const srcId of (i.stack||[])) G.oppTrash.push(srcId);
+        G.oppHand.push(i.cardId);
+        G.oppBattleArea = G.oppBattleArea.filter(x=>x.instanceId!==i.instanceId);
+        log(`　→ 相手の${getCard(i.cardId)?.name}を手札に戻した`,'important');
+      }
+      syncOppStateToGD(); render(); return;
+    }
+    if (candidates.length===1) { executeBounceOppToHand(candidates[0].instanceId); return; }
+    let html = `<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
+    for (const i of candidates) {
+      const c = getCard(i.cardId);
+      html += `<button class="modal-btn warn" onclick="executeBounceOppToHand('${i.instanceId}')">
+        ${c?.name} (DP:${getDP(i).toLocaleString()})</button>`;
+    }
+    html += `<button class="modal-btn" onclick="closeModal()">スキップ</button></div>`;
+    openModal('相手を手札に戻す', html);
+  },
+
+  // N体ごとにDP+（動的加算）
+  "dp_boost_per_unit": (inst, act) => {
+    // テイマー数・デジモン数等を数えてDP加算
+    const perUnit = act.perUnit || 1;
+    const value = act.value || 0;
+    // 計算元：テイマー数か進化元枚数か
+    let unitCount = 0;
+    const t2 = act._sourceText || '';
+    if (/テイマー/.test(t2)) {
+      unitCount = G.myBattleArea.filter(i=>getCard(i.cardId)?.type==='テイマー').length;
+    } else if (/進化元/.test(t2)) {
+      unitCount = (inst.stack||[]).length;
+    } else {
+      unitCount = G.myBattleArea.filter(i=>getCard(i.cardId)?.type==='デジモン').length;
+    }
+    const boost = Math.floor(unitCount / perUnit) * value;
+    if (boost > 0) {
+      inst.thisTurnDP = (inst.thisTurnDP||0) + boost;
+      log(`　→ ${unitCount}体/枚÷${perUnit}×${value} = DP+${boost}`,'system');
+      render();
+    }
+  },
+
+  // 進化元からコスト0登場
+  "play_from_source_free": (inst, act) => {
+    const filter = act.filter || {};
+    // 自分のバトルエリアのデジモンを選んでその進化元から登場
+    if (G.myBattleArea.length===0) { log('バトルエリアにデジモンがいません','system'); return; }
+    // 進化元を持つデジモンを選択
+    const withSource = G.myBattleArea.filter(i=>(i.stack||[]).length>0);
+    if (withSource.length===0) { log('進化元を持つデジモンがいません','system'); return; }
+    if (withSource.length===1) { openSourcePlayModal(withSource[0].instanceId, filter); return; }
+    let html = `<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
+    for (const i of withSource) {
+      html += `<button class="modal-btn primary" onclick="openSourcePlayModal('${i.instanceId}',${JSON.stringify(filter).replace(/"/g,"'")})">
+        ${getCard(i.cardId)?.name}（進化元${i.stack.length}枚）</button>`;
+    }
+    html += `<button class="modal-btn" onclick="closeModal()">スキップ</button></div>`;
+    openModal('進化元から登場', html);
+  },
+
+  // テイマーをコスト0で登場
+  "play_tamer_free": (inst, act) => {
+    const filter = act.filter || {};
+    const candidates = G.myHand.map((cId,idx)=>({cId,idx})).filter(({cId})=>{
+      const c = getCard(cId);
+      if (!c || c.type !== 'テイマー') return false;
+      if (filter.nameContains?.length>0 && !filter.nameContains.some(n=>(c.name||'').includes(n))) return false;
+      if (filter.features?.length>0 && !filter.features.some(f=>(c.features||[]).includes(f))) return false;
+      return true;
+    });
+    if (candidates.length===0) { log('手札に対象テイマーがありません','system'); return; }
+    if (candidates.length===1) { executePlayTamerFree(candidates[0].cId, candidates[0].idx); return; }
+    let html = `<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
+    for (const {cId,idx} of candidates) {
+      const c = getCard(cId);
+      html += `<button class="modal-btn primary" onclick="executePlayTamerFree('${cId}',${idx})">
+        ${c?.name}</button>`;
+    }
+    html += `<button class="modal-btn" onclick="closeModal()">スキップ</button></div>`;
+    openModal('テイマーをコスト0で登場', html);
+  },
+
+  // メモリーを相手側のNにする
+  "memory_to_opp": (inst, act) => {
+    const val = act.value || 3;
+    G.memory = -val; // 相手側なので負の値
+    if (G_isDoubleMode) GD.memory = Math.abs(val);
+    log(`　→ メモリーを相手側の${val}にしました`,'important');
+    renderMemory(); render();
+  },
+
+  // デジタマカードをデジタマデッキに戻す
+  "return_to_tamago_deck": (inst, act) => {
+    // トラッシュからデジタマカードを選んでデジタマデッキに戻す
+    const candidates = [...new Set(G.myTrash)].filter(cId=>getCard(cId)?.type==='デジタマ');
+    if (candidates.length===0) { log('トラッシュにデジタマカードがありません','system'); return; }
+    if (candidates.length===1) {
+      const cId = candidates[0];
+      G.myTrash.splice(G.myTrash.lastIndexOf(cId),1);
+      if (act.bottom) G.myTamagoDeck.unshift(cId); else G.myTamagoDeck.push(cId);
+      log(`　→ ${getCard(cId)?.name} をデジタマデッキ${act.bottom?'の下':''}に戻しました`,'important');
+      render(); return;
+    }
+    let html = `<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
+    for (const cId of candidates) {
+      html += `<button class="modal-btn primary" onclick="executeReturnToTamagoDeck('${cId}',${!!act.bottom})">
+        ${getCard(cId)?.name}</button>`;
+    }
+    html += `<button class="modal-btn" onclick="closeModal()">スキップ</button></div>`;
+    openModal('デジタマデッキに戻す', html);
+  },
+
+  // 相手のデッキトップをN枚破棄
+  "opp_deck_trash": (inst, act) => {
+    const count = act.count || 1;
+    const actual = Math.min(count, G.oppDeck.length);
+    if (actual===0) { log('相手のデッキが空です','system'); return; }
+    for (let i=0;i<actual;i++) {
+      const cId = G.oppDeck.pop();
+      G.oppTrash.push(cId);
+      log(`　→ 相手のデッキから ${getCard(cId)?.name||cId} を破棄`,'important');
+    }
+    syncOppStateToGD(); render();
+  },
+
+  // このデジモンを手札に戻す
+  "return_self_to_hand": (inst, act) => {
+    G.myBattleArea = G.myBattleArea.filter(i=>i.instanceId!==inst.instanceId);
+    // 進化元もトラッシュへ
+    for (const srcId of (inst.stack||[])) G.myTrash.push(srcId);
+    G.myHand.push(inst.cardId);
+    log(`　→ ${getCard(inst.cardId)?.name} を手札に戻しました`,'important');
+    render();
+  },
+
+  // リカバリー+N（デッキトップをセキュリティに追加）
+  "recovery": (inst, act) => {
+    const count = act.count || 1;
+    const actual = Math.min(count, G.myDeck.length);
+    for (let i=0; i<actual; i++) {
+      const cId = G.myDeck.pop();
+      G.mySecurity.push(cId);
+      log(`🛡 リカバリー: ${getCard(cId)?.name||cId} をセキュリティに追加`, 'important');
+    }
+    render();
+  },
+
+  // トラッシュから進化元に加える
+  "trash_to_source": (inst, act) => {
+    const filter = act.filter || {};
+    const candidates = [...new Set(G.myTrash)].filter(cId => {
+      const c = getCard(cId);
+      if (!c) return false;
+      if (filter.nameContains?.length>0 && !filter.nameContains.some(n=>(c.name||'').includes(n))) return false;
+      if (filter.colors?.length>0 && !filter.colors.some(col=>(c.color||[]).includes(col))) return false;
+      if (filter.level !== undefined && c.level !== filter.level) return false;
+      return true;
+    });
+    if (candidates.length===0) { log('トラッシュに対象カードがありません','system'); return; }
+    // 対象デジモンを選択
+    const targets = G.myBattleArea.filter(i=>getCard(i.cardId)?.type==='デジモン');
+    if (targets.length===0) { log('バトルエリアにデジモンがいません','system'); return; }
+    G._trashToSourceData = { candidates, act, targets };
+    if (candidates.length===1 && targets.length===1) {
+      executeTrashToSource(candidates[0], targets[0].instanceId, act.bottom); return;
+    }
+    let html = `<p style="font-size:11px;color:var(--text-dim);margin-bottom:6px;">進化元に加えるカードを選んでください</p>`;
+    html += `<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
+    for (const cId of candidates) {
+      const c = getCard(cId);
+      html += `<button class="modal-btn primary" onclick="selectTrashToSourceCard('${cId}')">
+        ${c?.name} (Lv.${c?.level||'?'})</button>`;
+    }
+    html += `<button class="modal-btn" onclick="closeModal()">スキップ</button></div>`;
+    openModal('トラッシュから進化元に', html);
+  },
+
+  // 手札から進化元に加える
+  "hand_to_source": (inst, act) => {
+    const filter = act.filter || {};
+    const candidates = G.myHand.map((cId,idx)=>({cId,idx})).filter(({cId})=>{
+      const c = getCard(cId);
+      if (!c) return false;
+      const ct = filter.cardType || 'デジモン';
+      if (c.type !== ct) return false;
+      if (filter.colors?.length>0 && !filter.colors.some(col=>(c.color||[]).includes(col))) return false;
+      return true;
+    });
+    if (candidates.length===0) { log('手札に対象カードがありません','system'); return; }
+    G._handToSourceInst = inst;
+    G._handToSourceAct = act;
+    if (candidates.length===1) { executeHandToSource(candidates[0].cId, candidates[0].idx, inst.instanceId, act.bottom, act.top); return; }
+    let html = `<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
+    for (const {cId,idx} of candidates) {
+      const c = getCard(cId);
+      html += `<button class="modal-btn primary" onclick="executeHandToSource('${cId}',${idx},'${inst.instanceId}',${!!act.bottom},${!!act.top})">
+        ${c?.name}</button>`;
+    }
+    html += `<button class="modal-btn" onclick="closeModal()">スキップ</button></div>`;
+    openModal('手札から進化元に', html);
+  },
+
+  // 進化元N枚ごとにDP+（ターン中永続）
+  "dp_per_source": (inst, act) => {
+    const sourceLen = (inst.stack||[]).length;
+    const boost = Math.floor(sourceLen / act.perUnit) * act.value;
+    if (boost > 0) {
+      inst.thisTurnDP = (inst.thisTurnDP||0) + boost;
+      log(`　→ 進化元${sourceLen}枚÷${act.perUnit}×${act.value} = DP+${boost}`, 'system');
+      render();
+    }
+  },
+
+  // 進化元N枚ごとにSアタック+N
+  "satk_per_source": (inst, act) => {
+    const sourceLen = (inst.stack||[]).length;
+    const boost = Math.floor(sourceLen / act.perUnit) * act.value;
+    if (boost > 0) {
+      inst.tempSatk = (inst.tempSatk||0) + boost;
+      log(`　→ 進化元${sourceLen}枚÷${act.perUnit}×${act.value} = Sアタック+${boost}`, 'system');
+      render();
+    }
+  },
+
+  // 自分のセキュリティを全て確認する
+  "check_all_security": (inst, act) => {
+    if (G.mySecurity.length===0) { log('セキュリティが0枚です','system'); return; }
+    const condText = act.conditionText || '';
+    const matches = G.mySecurity.filter(cId => {
+      if (!condText) return false;
+      const c = getCard(cId);
+      if (!c) return false;
+      const lvM = condText.match(/Lv\.(\d+)以下/);
+      if (lvM && (c.level||99) > parseInt(lvM[1])) return false;
+      const typeM = condText.match(/(デジモン|テイマー)/);
+      if (typeM && c.type !== typeM[1]) return false;
+      return true;
+    });
+    if (matches.length===0) {
+      log(`セキュリティ確認：条件を満たすカードなし`, 'system');
+    } else {
+      log(`セキュリティ確認：${matches.map(cId=>getCard(cId)?.name||cId).join('、')}`, 'system');
+    }
+    let html = `<p style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">
+      セキュリティ（${G.mySecurity.length}枚）</p>`;
+    html += `<div style="max-height:200px;overflow-y:auto;">`;
+    for (const cId of [...G.mySecurity].reverse()) {
+      const c = getCard(cId);
+      const isMatch = matches.includes(cId);
+      html += `<div style="display:flex;justify-content:space-between;align-items:center;
+        padding:4px 8px;border-radius:4px;margin-bottom:2px;
+        background:${isMatch?'rgba(64,192,128,0.1)':'var(--bg-card)'};">
+        <span style="font-size:10px;color:var(--text-bright);">${c?.name||cId}</span>
+        ${isMatch?'<button class="modal-btn" style="font-size:9px;padding:2px 6px;" onclick="playSecurityCardFree(\''+cId+'\')">手札に</button>':''}
+      </div>`;
+    }
+    html += `</div>`;
+    if (act.shuffle) html += `<p style="font-size:9px;color:var(--text-dim);margin-top:6px;">※確認後にシャッフルされます</p>`;
+    html += `<button class="modal-btn" style="margin-top:8px;" onclick="closeCheckSecurity(${act.shuffle})">閉じる</button>`;
+    openModal('セキュリティ確認', html);
+  },
+
+  // 相手テイマーを消滅させる
+  "destroy_opp_tamer": (inst, act) => {
+    const tamers = G.oppBattleArea.filter(i=>getCard(i.cardId)?.type==='テイマー');
+    if (tamers.length===0) { log('相手のテイマーがいません','system'); return; }
+    if (tamers.length===1) {
+      const t = tamers[0];
+      G.oppBattleArea = G.oppBattleArea.filter(i=>i.instanceId!==t.instanceId);
+      G.oppTrash.push(t.cardId);
+      log(`💀 相手の${getCard(t.cardId)?.name}を消滅させました`,'important');
+      syncOppStateToGD(); render(); return;
+    }
+    let html = `<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
+    for (const t of tamers) {
+      html += `<button class="modal-btn warn" onclick="executeDestroyOppTamer('${t.instanceId}')">
+        ${getCard(t.cardId)?.name}</button>`;
+    }
+    html += `<button class="modal-btn" onclick="closeModal()">スキップ</button></div>`;
+    openModal('相手のテイマーを消滅', html);
+  },
+
+  // 相手のデジモン全てをレストさせる
+  "rest_all_opp": (inst, act) => {
+    const targets = G.oppBattleArea.filter(i=>{
+      if (getCard(i.cardId)?.type!=='デジモン') return false;
+      if (act.maxDP !== null && act.maxDP !== undefined && getDP(i) > act.maxDP) return false;
+      return true;
+    });
+    for (const i of targets) {
+      i.isRested = true;
+      log(`　→ 相手の${getCard(i.cardId)?.name}をレスト`,'system');
+    }
+    syncOppStateToGD(); render();
+  },
+
+  // 自分のデジモン全てをアクティブにする
+  "activate_all_my": (inst, act) => {
+    for (const i of G.myBattleArea) {
+      if (getCard(i.cardId)?.type==='デジモン') {
+        i.isRested = false;
+      }
+    }
+    log(`　→ 自分のデジモン全てをアクティブにしました`,'system');
+    render();
+  },
+
+  // 相手のデジモン全てを手札に戻す
+  "bounce_all_opp_to_hand": (inst, act) => {
+    const targets = G.oppBattleArea.filter(i=>{
+      if (getCard(i.cardId)?.type!=='デジモン') return false;
+      if (act.maxDP !== null && act.maxDP !== undefined && getDP(i) > act.maxDP) return false;
+      return true;
+    });
+    for (const i of [...targets]) {
+      for (const srcId of (i.stack||[])) G.oppTrash.push(srcId);
+      G.oppHand.push(i.cardId);
+      G.oppBattleArea = G.oppBattleArea.filter(x=>x.instanceId!==i.instanceId);
+      log(`　→ 相手の${getCard(i.cardId)?.name}を手札に戻しました`,'important');
+    }
+    syncOppStateToGD(); render();
+  },
+
   // ゲーム勝利
   "game_win": (inst, act) => {
     log('🏆 勝利条件達成！ゲームに勝利します！', 'win');
@@ -3852,7 +4433,16 @@ function openPlayDigimonModal(cardId, handIndex) {
         if (act.condition && !checkCondition(act.condition, null)) continue;
         // コスト行動の場合（ディアボロモン消滅等）→ 選択肢として表示
         if (act.costAction) {
-          prePlayNote = `（${act.costAction}でコスト-${act.discount}）`;
+          // 育成エリアのデジモンを消滅させることで軽減
+          if (act.costAction.includes('育成エリア') && G.myBreeding) {
+            const bc = getCard(G.myBreeding.cardId);
+            if (bc && (bc.level||0) <= 2) {
+              playCost = Math.max(0, playCost - act.discount);
+              prePlayNote = `🌱 育成エリアの${bc.name}を消滅でコスト-${act.discount}`;
+            }
+          } else {
+            prePlayNote = `（${act.costAction}でコスト-${act.discount}）`;
+          }
           break;
         }
         if (act.costFormula) {
@@ -3900,8 +4490,26 @@ function openPlayDigimonModal(cardId, handIndex) {
 
 function confirmPlayDigimon(cardId, handIndex, overrideCost) {
   const card = getCard(cardId);
-  const cost = overrideCost !== undefined ? overrideCost : (card.cost||0);
+  let cost = overrideCost !== undefined ? overrideCost : (card.cost||0);
   if (!canAfford(cost)) { log(`コスト不足！必要: ${cost}`,"system"); return; }
+
+  // 育成エリアを消滅させることでのコスト軽減を実行
+  if (card._parsed_effects) {
+    for (const block of card._parsed_effects) {
+      for (const act of (block.actions||[])) {
+        if (act.type === 'pre_play_cost_reduce' && act.costAction?.includes('育成エリア') && G.myBreeding) {
+          const bc = getCard(G.myBreeding.cardId);
+          if (bc && (bc.level||0) <= 2) {
+            // 育成エリアのデジモンを消滅（消滅時効果なし）
+            for (const srcId of (G.myBreeding.stack||[])) G.myTrash.push(srcId);
+            G.myTrash.push(G.myBreeding.cardId);
+            log(`　→ 育成エリアの${bc.name}を消滅させコスト-${act.discount}`,'system');
+            G.myBreeding = null;
+          }
+        }
+      }
+    }
+  }
   G.myHand.splice(handIndex,1);
   const inst = newInstance(cardId);
   inst.usedThisTurn=true;
@@ -4047,6 +4655,8 @@ function resolveOptionEffect(card) {
 function canEvolveOnto(newCard, targetInst) {
   const targetCard = getCard(targetInst.cardId);
   if (!targetCard) return null;
+  // 進化できないステータスチェック
+  if (targetInst.grantedStatus?.cannot_evolve) return null;
 
   // 通常進化条件チェック
   for (const evo of (newCard.evolution||[])) {
@@ -4087,8 +4697,16 @@ function canEvolveOnto(newCard, targetInst) {
 function getEvoCost(newCard, targetInst) {
   const res = canEvolveOnto(newCard, targetInst);
   if (!res) return null;
-  // G.evoDiscountを適用（最低0）
-  return Math.max(0, res.evo.cost - (G.evoDiscount || 0));
+  // G.evoDiscountを適用
+  let discount = G.evoDiscount || 0;
+  // 進化元テキストの「支払う進化コスト-N」も加算
+  for (const srcId of (targetInst.stack||[])) {
+    const srcCard = getCard(srcId);
+    const evoTxt = srcCard?._evolved_text || '';
+    const dMs = [...evoTxt.matchAll(/支払う進化コスト[-－](\d+)/g)];
+    for (const dm of dMs) discount += parseInt(dm[1]);
+  }
+  return Math.max(0, res.evo.cost - discount);
 }
 
 function openEvolutionSelect(cardId, handIndex) {
@@ -4222,11 +4840,16 @@ function canEvolveOntoAll(newCard, targetInst) {
 
 function confirmEvolve(newCardId, handIndex, targetInstId, cost) {
   const newCard = getCard(newCardId);
-  if (!canAfford(cost)) { log(`コスト不足！進化コスト: ${cost}`,"system"); return; }
+  // 進化元の「支払う進化コスト-N」を加算してコスト再計算
   let targetInst = G.myBattleArea.find(i=>i.instanceId===targetInstId);
   let inBreeding = false;
   if (!targetInst&&G.myBreeding&&G.myBreeding.instanceId===targetInstId) { targetInst=G.myBreeding; inBreeding=true; }
   if (!targetInst) { closeModal(); return; }
+  if (targetInst) {
+    const actualCost = getEvoCost(newCard, targetInst);
+    if (actualCost !== null) cost = actualCost;
+  }
+  if (!canAfford(cost)) { log(`コスト不足！進化コスト: ${cost}`,"system"); return; }
 
   // ===== ①進化成立前：「進化するとき」に反応する効果を収集 =====
   const beforeEvoEffects = [];
@@ -4792,6 +5415,25 @@ function parseConditionText(text) {
   if (m) return {type:'body_count', side:'my', op: m[2]==='以上'?'>=':'<=', value:parseInt(m[1])};
   // トラッシュから進化していたとき
   if (/トラッシュから進化していたとき/.test(text)) return {type:'trash_evolved'};
+  // 自分のテイマーがいる/N体以上
+  m = text.match(/自分のテイマーが(\d+)体以上/);
+  if (m) return {type:'my_tamer_exists', count:parseInt(m[1])};
+  if (/自分のテイマーがいる/.test(text)) return {type:'my_tamer_exists', count:1};
+  // 自分のデジモンがN体以上
+  m = text.match(/自分のデジモンが(\d+)体以上/);
+  if (m) return {type:'my_digimon_count', count:parseInt(m[1])};
+  // 進化元にテイマーカードがある
+  if (/進化元にテイマーカードがある/.test(text)) return {type:'source_has_tamer'};
+  // このデジモンが登場時効果を持つ
+  if (/このデジモンが登場時効果を持つ/.test(text)) return {type:'self_has_played_effect'};
+  // このデジモンがアタック中
+  if (/このデジモンがアタック中/.test(text)) return {type:'is_attacking'};
+  // 相手のデジモンのDPがN以上
+  m = text.match(/相手のデジモン.{0,20}DP(\d+)(以上|以下)/);
+  if (m) return {type:'opp_dp', op:m[2]==='以上'?'>=':'<=', value:parseInt(m[1])};
+  // 相手の手札がN枚以下
+  m = text.match(/相手の手札が(\d+)枚(以上|以下)/);
+  if (m) return {type:'hand_count', operator:m[2]==='以上'?'>=':'<=', value:parseInt(m[1]), side:'opp'};
   return {type:'unknown', text:text.slice(0,30)};
 }
 
@@ -5028,6 +5670,11 @@ function parseActionsFromText(t) {
     actions.push({ type:'grant_status', status:['cannot_evolve_cost_minus'], duration:'permanent', target:side }); return actions;
   }
 
+  // 「このデジモンは進化できない」（自分のデジモンに進化不可を付与）
+  if (/このデジモンは進化できない/.test(t)) {
+    actions.push({ type:'grant_status', status:['cannot_evolve'], duration:'permanent', target:'self' }); return actions;
+  }
+
   // 「このデジモンの色はXとしても扱う」
   const alsoColorM = t.match(/このデジモンの色は([赤青緑黄黒紫白]+)としても扱う/);
   if (alsoColorM) {
@@ -5162,11 +5809,13 @@ function parseActionsFromText(t) {
   const revealM = t.match(/デッキの上から(\d+)枚(?:オープン|公開)/);
   if (revealM) {
     const condM = t.match(/その中の(.{0,60}?)(?:1枚|を手札に加える)/);
-    // 「残りは破棄する」かどうかを検出（デッキ破棄ではないのでonMyDeckTrashedByEffectは発火しない）
     const discardRest = /残りは破棄/.test(t);
+    // 「残りはデッキの下に戻す。その後、〜」の後続処理
+    const afterM = t.match(/残りはデッキの下に戻す。その後、(.+)$/);
+    const afterActions = afterM ? parseActionsFromText(afterM[1].trim()) : [];
     actions.push({type:'reveal_deck_top', count:parseInt(revealM[1]),
                   conditionText: condM ? condM[1].trim() : '',
-                  discardRest});
+                  discardRest, afterActions});
     return actions;
   }
 
@@ -5436,8 +6085,276 @@ function parseActionsFromText(t) {
     return actions;
   }
 
-  // トラッシュから手札へ
-  if (/トラッシュから.{0,20}手札に/.test(t)) { actions.push({type:'return_from_trash_to_hand'}); }
+  // 手札からコスト0登場
+  if (/手札から.{0,40}コストを支払わずに登場/.test(t)) {
+    const filter = {};
+    const nameMs = [...t.matchAll(/「([^」]+)」/g)].map(m=>m[1]);
+    if (nameMs.length > 0) filter.nameContains = nameMs;
+    const colorM = t.match(/([赤青緑黄黒紫白]+)の/);
+    if (colorM) filter.colors = [...colorM[1]];
+    const lvM = t.match(/Lv\.(\d+)/);
+    if (lvM) filter.level = parseInt(lvM[1]);
+    const typeM = t.match(/(デジモン|テイマー|オプション)カード/);
+    filter.cardType = typeM?.[1] || 'デジモン';
+    const fromTrash = /手札か.{0,5}トラッシュ|トラッシュか.{0,5}手札/.test(t);
+    actions.push({ type:'play_from_hand_free', filter, fromTrash }); return actions;
+  }
+
+  // 相手のセキュリティをN枚破棄
+  if (/相手のセキュリティ.{0,20}破棄/.test(t)) {
+    const nM = t.match(/(\d+)枚/);
+    actions.push({ type:'opp_security_trash', count: nM ? parseInt(nM[1]) : 1 }); return actions;
+  }
+
+  // 相手のデジモンをデッキに戻す
+  if (/相手のデジモン.{0,30}デッキ.{0,10}戻す/.test(t)) {
+    const dpM = t.match(/DP(\d+)以下/);
+    const bottomM = /デッキの下/.test(t);
+    actions.push({ type:'bounce_opp_to_deck', maxDP: dpM ? parseInt(dpM[1]) : null, bottom: bottomM }); return actions;
+  }
+
+  // 相手のデジモンをアクティブにしない
+  if (/相手のデジモン.{0,30}アクティブにならず/.test(t)) {
+    const nM = t.match(/(\d+)体/);
+    actions.push({ type:'prevent_activate_opp', count: nM ? parseInt(nM[1]) : 1 }); return actions;
+  }
+
+  // 相手のデジモンをアクティブにする
+  if (/相手のデジモン.{0,20}アクティブにする/.test(t)) {
+    actions.push({ type:'activate_opp_digimon' }); return actions;
+  }
+
+  // 育成エリアのデジモンをバトルエリアに移動
+  if (/バトルエリアに移動/.test(t)) {
+    actions.push({ type:'move_breeding_to_battle' }); return actions;
+  }
+
+  // ターン終了まで速攻/貫通/ブロッカー/再起動/Sアタック付与
+  if (/ターン終了まで/.test(t) && /速攻|貫通|ブロッカー|再起動|Sアタック/.test(t)) {
+    const kws = [];
+    if (/速攻/.test(t)) kws.push('speed');
+    if (/貫通/.test(t)) kws.push('piercing');
+    if (/ブロッカー/.test(t)) kws.push('blocker');
+    if (/再起動/.test(t)) kws.push('reboot');
+    const satkM = t.match(/Sアタック([+＋\-－])(\d+)/);
+    if (satkM) kws.push('satk' + (['+','＋'].includes(satkM[1])?'+':'-') + satkM[2]);
+    const dpMkw = t.match(/DP[+＋](\d+)/);
+    if (dpMkw) kws.push('dp+' + dpMkw[1]);
+    const targetOpp = /相手のデジモン/.test(t);
+    const targetAll = /自分のデジモン全て/.test(t);
+    const dur = /相手のターン終了まで/.test(t) ? 'until_opp_turn_end' : 'this_turn';
+    if (kws.length > 0) {
+      actions.push({ type:'grant_keywords_duration', keywords:kws,
+        target: targetOpp?'opp_choose':targetAll?'my_all':'self', duration:dur });
+      return actions;
+    }
+  }
+
+  // 自分のデジモン全てDP+N
+  if (/自分のデジモン全て.{0,20}DP[+＋]/.test(t)) {
+    const nM = t.match(/DP[+＋](\d+)/);
+    actions.push({ type:'dp_boost_all', value: nM ? parseInt(nM[1]) : 0, side:'my' }); return actions;
+  }
+
+  // 相手のデジモン全てDP-N
+  if (/相手のデジモン全て.{0,20}DP[-－]/.test(t)) {
+    const nM = t.match(/DP[-－](\d+)/);
+    actions.push({ type:'dp_reduce_all', value: nM ? parseInt(nM[1]) : 0 }); return actions;
+  }
+
+  // デッキからコスト0登場
+  if (/デッキから.{0,40}コストを支払わずに登場/.test(t)) {
+    const filter = {};
+    const nameMs = [...t.matchAll(/「([^」]+)」/g)].map(m=>m[1]);
+    if (nameMs.length>0) filter.nameContains = nameMs;
+    const lvM2 = t.match(/Lv\.(\d+)/);
+    if (lvM2) filter.level = parseInt(lvM2[1]);
+    actions.push({ type:'play_from_deck_free', filter }); return actions;
+  }
+
+  // 相手のデジモン全てをレストさせる
+  if (/相手のデジモン全てをレスト/.test(t)) {
+    const dpMr = t.match(/DP(\d+)以下の/);
+    actions.push({ type:'rest_all_opp', maxDP: dpMr?parseInt(dpMr[1]):null }); return actions;
+  }
+
+  // 自分のデジモン全てをアクティブにする
+  if (/自分のデジモン全てをアクティブ/.test(t)) {
+    actions.push({ type:'activate_all_my' }); return actions;
+  }
+
+  // 相手のデジモン全てを手札に戻す
+  if (/相手のデジモン全てを手札に戻す/.test(t)) {
+    const dpMb = t.match(/DP(\d+)以下の/);
+    actions.push({ type:'bounce_all_opp_to_hand', maxDP: dpMb?parseInt(dpMb[1]):null }); return actions;
+  }
+
+  // 相手の効果で消滅しない
+  if (/相手の効果で消滅しない/.test(t)) {
+    actions.push({ type:'grant_status', status:['immune_opp_effect_destroy'], duration:'permanent', target:'self' }); return actions;
+  }
+
+  // ブロックされない
+  if (/ブロックされない/.test(t)) {
+    actions.push({ type:'grant_status', status:['unblockable'], duration:'permanent', target:'self' }); return actions;
+  }
+
+  // 進化元の下に置く（コスト行動・効果）
+  if (/進化元の下に置/.test(t)) {
+    actions.push({ type:'place_under_source' }); return actions;
+  }
+
+  // セキュリティの上に置く
+  if (/セキュリティの上に置/.test(t)) {
+    const lvM2 = t.match(/Lv\.(\d+)以下/);
+    const typeM = t.match(/(デジモン|テイマー|オプション)カード/);
+    actions.push({ type:'place_on_security_top', maxLevel: lvM2?parseInt(lvM2[1]):null, cardType: typeM?.[1]||'デジモン' });
+    return actions;
+  }
+
+  // 相手のデジモンを手札に戻す
+  if (/相手のデジモン.{0,30}手札に戻す/.test(t)) {
+    const dpM2 = t.match(/DP(\d+)以下/);
+    const allM = /全て/.test(t);
+    actions.push({ type:'bounce_opp_to_hand', maxDP: dpM2?parseInt(dpM2[1]):null, all: allM }); return actions;
+  }
+
+  // N体/枚ごとにDP+（動的DP加算）
+  const perUnitDpM = t.match(/(\d+)(?:体|枚)ごとに.{0,30}DP[+＋](\d+)/);
+  if (perUnitDpM) {
+    actions.push({ type:'dp_boost_per_unit', perUnit: parseInt(perUnitDpM[1]), value: parseInt(perUnitDpM[2]) }); return actions;
+  }
+
+  // デジタマカードをデジタマデッキに戻す
+  if (/デジタマデッキ.{0,20}戻す/.test(t)) {
+    actions.push({ type:'return_to_tamago_deck', bottom:/デジタマデッキの下/.test(t) }); return actions;
+  }
+
+  // 相手のデッキトップをN枚破棄
+  if (/相手のデッキの上から\d+枚破棄/.test(t)) {
+    const nM2 = t.match(/相手のデッキの上から(\d+)枚破棄/);
+    actions.push({ type:'opp_deck_trash', count: nM2 ? parseInt(nM2[1]) : 1 }); return actions;
+  }
+
+  // このデジモンを手札に戻す（自分）
+  if (/このデジモンを手札に戻す/.test(t)) {
+    actions.push({ type:'return_self_to_hand' }); return actions;
+  }
+
+  // リカバリー+N
+  const recoveryM = t.match(/リカバリー[+＋](\d+)/);
+  if (recoveryM) {
+    actions.push({ type:'recovery', count: parseInt(recoveryM[1]) }); return actions;
+  }
+
+  // トラッシュから進化元に加える
+  if (/トラッシュから.{0,40}進化元/.test(t)) {
+    const filter = {};
+    const nameMs3 = [...t.matchAll(/「([^」]+)」/g)].map(m=>m[1]);
+    if (nameMs3.length>0) filter.nameContains = nameMs3;
+    const colorM3 = t.match(/([赤青緑黄黒紫白]+)の/);
+    if (colorM3) filter.colors = [...colorM3[1]];
+    const lvM3 = t.match(/Lv\.(\d+)/);
+    if (lvM3) filter.level = parseInt(lvM3[1]);
+    actions.push({ type:'trash_to_source', filter, bottom:/1番下/.test(t), top:/1番上/.test(t) }); return actions;
+  }
+
+  // 手札から進化元に加える
+  if (/手札から.{0,40}進化元/.test(t)) {
+    const filter = {};
+    const colorM3 = t.match(/([赤青緑黄黒紫白]+)の/);
+    if (colorM3) filter.colors = [...colorM3[1]];
+    const typeM3 = t.match(/(デジモン|テイマー|オプション)カード/);
+    filter.cardType = typeM3?.[1] || 'デジモン';
+    actions.push({ type:'hand_to_source', filter, bottom:/1番下/.test(t), top:/1番上/.test(t) }); return actions;
+  }
+
+  // 進化元N枚ごとにDP+
+  const sourcePerDpM = t.match(/進化元.{0,10}(\d+)枚ごとに.{0,20}DP[+＋](\d+)/);
+  if (sourcePerDpM) {
+    actions.push({ type:'dp_per_source', perUnit: parseInt(sourcePerDpM[1]), value: parseInt(sourcePerDpM[2]) }); return actions;
+  }
+
+  // 進化元N枚ごとにSアタック+N
+  const sourcePerSatkM = t.match(/進化元.{0,10}(\d+)枚ごとに.{0,20}Sアタック[+＋](\d+)/);
+  if (sourcePerSatkM) {
+    actions.push({ type:'satk_per_source', perUnit: parseInt(sourcePerSatkM[1]), value: parseInt(sourcePerSatkM[2]) }); return actions;
+  }
+
+  // 自分のセキュリティを全て確認する
+  if (/自分のセキュリティを全て確認/.test(t)) {
+    const addM3 = t.match(/その中の(.{0,60}?)(?:1枚|を手札に加える)/);
+    actions.push({ type:'check_all_security', conditionText: addM3?addM3[1].trim():'', shuffle:/シャッフルする/.test(t) });
+    return actions;
+  }
+
+  // 相手のテイマーを消滅させる
+  if (/相手のテイマー.{0,20}消滅/.test(t)) {
+    actions.push({ type:'destroy_opp_tamer' }); return actions;
+  }
+
+  // 自分の進化元からコスト0登場
+  if (/進化元から.{0,30}(?:コストを支払わずに)?登場/.test(t) && !/進化元から進化/.test(t)) {
+    const filter = {};
+    const nameMs2 = [...t.matchAll(/「([^」]+)」/g)].map(m=>m[1]);
+    if (nameMs2.length>0) filter.nameContains = nameMs2;
+    const lvM2 = t.match(/Lv\.(\d+)/);
+    if (lvM2) filter.level = parseInt(lvM2[1]);
+    actions.push({ type:'play_from_source_free', filter }); return actions;
+  }
+
+  // テイマーカードをコスト0で登場
+  if (/テイマーカード.{0,20}コストを支払わずに登場/.test(t)) {
+    const filter = {};
+    const nameMs2 = [...t.matchAll(/「([^」]+)」/g)].map(m=>m[1]);
+    if (nameMs2.length>0) filter.nameContains = nameMs2;
+    const featureMs = [...t.matchAll(/特徴(?:に)?「([^」]+)」/g)].map(m=>m[1]);
+    if (featureMs.length>0) filter.features = featureMs;
+    actions.push({ type:'play_tamer_free', filter }); return actions;
+  }
+
+  // メモリーを相手側のNにする
+  if (/メモリーを相手側の\d+にする|メモリーを相手側の\d+にできる/.test(t)) {
+    const nM2 = t.match(/相手側の(\d+)/);
+    actions.push({ type:'memory_to_opp', value: nM2?parseInt(nM2[1]):3 }); return actions;
+  }
+
+  // トラッシュから名称/色/Lv指定でコスト0登場
+  if (/トラッシュから.{0,40}コストを支払わずに登場/.test(t)) {
+    const filter = {};
+    // 名称指定「「X」」
+    const nameMs = [...t.matchAll(/「([^」]+)」/g)].map(m=>m[1]);
+    if (nameMs.length > 0) filter.nameContains = nameMs;
+    // 色指定
+    const colorM = t.match(/([赤青緑黄黒紫白]+)の/);
+    if (colorM) filter.colors = [...colorM[1]];
+    // レベル指定
+    const lvM = t.match(/Lv\.(\d+)の/);
+    if (lvM) filter.level = parseInt(lvM[1]);
+    // 手札かトラッシュ
+    const fromHand = /手札か?トラッシュ|トラッシュか?手札/.test(t);
+    actions.push({ type:'play_from_trash_free', filter, fromHand }); return actions;
+  }
+
+  // トラッシュから手札へ（フィルター付き）
+  if (/トラッシュから.{0,40}手札に/.test(t)) {
+    const filter = {};
+    // レベル指定
+    const lvM = t.match(/Lv\.(\d+)の/);
+    if (lvM) filter.level = parseInt(lvM[1]);
+    // 名称除外（「X以外の」）
+    const excludeM = t.match(/「([^」]+)」以外の/);
+    if (excludeM) filter.excludeName = excludeM[1];
+    // 消滅時効果を持つ
+    if (/消滅時効果を持つ/.test(t)) filter.hasDestroyEffect = true;
+    // 記述がある
+    const descMs = [...t.matchAll(/「([^」]+)」の記述がある/g)].map(m=>m[1]);
+    if (descMs.length > 0) filter.descContains = descMs;
+    // カード種別
+    const typeM = t.match(/(デジモン|テイマー|オプション)カード/);
+    const cardType = typeM ? typeM[1] : 'デジモン';
+    actions.push({ type:'return_from_trash_to_hand', cardType, filter });
+  }
 
   // 相手の手札破棄アクション（「相手の手札を1枚見ないで破棄する」等）
   const oppDiscardM = t.match(/相手(?:の手札を?|は.{0,5}手札を?)(?:見ないで)?(\d+)枚(?:見ないで)?破棄/);
@@ -5984,7 +6901,7 @@ function resolveTextAction(inst, actionText, parsed) {
   }
 
   // 「手札のこのカードを登場させるとき、〜コスト-N」（登場前コスト行動）
-  const prePlayM = t.match(/(?:手札の)?このカードを登場させるとき、(.+?)(?:支払う)?登場コスト(?:を)?[-－](\d+)/);
+  const prePlayM = t.match(/(?:手札の)?このカード(?:を|が)登場(?:させる)?とき[、,](.+?)(?:[、,]支払う)?登場コスト(?:を)?[-－](\d+)/);
   // 「N枚ごとに登場コスト-M」動的軽減
   const perTrashCostM = t.match(/お互いのトラッシュ合計(\d+)枚ごとに.{0,20}登場コスト[-－](\d+)/);
   if (perTrashCostM) {
@@ -6632,7 +7549,9 @@ function checkSubTriggers(newInst, eventType) {
 // デッキ公開モーダル：プレイヤーが手動でカードを選択する
 // addToHand: 手札に加える枚数（0なら全てデッキ下に戻す）
 // conditionText: 選択条件の説明テキスト
-function openRevealModal(inst, eff, revealed, addToHand=1, conditionText='') {
+function openRevealModal(inst, eff, revealed, addToHand=1, conditionText='', afterActions=[]) {
+  G._revealAfterActions = afterActions;
+  G._revealInst = inst;
   if (revealed.length===0) { log("デッキが空です","system"); return; }
   // グローバルに公開カードを保持（選択状態の管理用）
   G._revealedCards = [...revealed];
@@ -6662,6 +7581,15 @@ function openRevealModal(inst, eff, revealed, addToHand=1, conditionText='') {
     // 「〜のデジモンカード」色条件
     const colorM = conditionText.match(/([赤青緑黄黒紫白]+)の.*カード/);
     if (colorM) return [...colorM[1]].some(col => (c.color||[]).includes(col));
+    // 「「X」/「Y」の記述があるカード」条件
+    const descM = [...conditionText.matchAll(/「([^」]+)」の記述がある/g)].map(m=>m[1]);
+    if (descM.length > 0) {
+      const allText = (c.name||'') + (c._effect_text||'') + (c._evolved_text||'');
+      return descM.some(n => allText.includes(n));
+    }
+    // Lv.条件
+    const lvM = conditionText.match(/Lv\.(\d+)/);
+    if (lvM) return String(c.level) === lvM[1];
     return true;
   };
 
@@ -6767,9 +7695,21 @@ function confirmRevealSelection(addCount) {
     log(`　→ ${getCard(toBottom[0])?.name} をデッキ下に戻しました`, "system");
     G._revealedCards = [];
     closeModal(); render();
+    _executeRevealAfterActions();
   } else {
     G._revealedCards = [];
     closeModal(); render();
+    _executeRevealAfterActions();
+  }
+}
+
+function _executeRevealAfterActions() {
+  const after = G._revealAfterActions || [];
+  const inst = G._revealInst;
+  G._revealAfterActions = [];
+  G._revealInst = null;
+  if (after.length > 0 && inst) {
+    resolveStructuredActions(inst, after);
   }
 }
 
@@ -6904,13 +7844,31 @@ function confirmDiscardSelected(count) {
 }
 
 function openReturnFromTrashModal(act) {
-  const cardType = act?.cardType||"デジモン";
-  const candidates = G.myTrash.filter(cId=>{
-    const c=getCard(cId);
-    return !cardType||c?.type===cardType;
+  const cardType = act?.cardType || "デジモン";
+  const filter = act?.filter || {};
+  const candidates = G.myTrash.filter(cId => {
+    const c = getCard(cId);
+    if (!c) return false;
+    if (cardType && c.type !== cardType) return false;
+    // レベルフィルター
+    if (filter.level !== undefined && c.level !== filter.level) return false;
+    // 名称除外
+    if (filter.excludeName && (c.name||'').includes(filter.excludeName)) return false;
+    // 消滅時効果を持つ
+    if (filter.hasDestroyEffect) {
+      const blocks = c._parsed_effects || splitAndParseEffects(c._effect_text||'');
+      const hasDestroy = blocks.some(b => b.triggers.includes('消滅時') || b.specialTrigger === 'onDestroyed');
+      if (!hasDestroy) return false;
+    }
+    // 記述がある
+    if (filter.descContains) {
+      const allText = (c.name||'') + (c._effect_text||'') + (c._evolved_text||'');
+      if (!filter.descContains.some(n => allText.includes(n))) return false;
+    }
+    return true;
   });
   const unique = [...new Set(candidates)];
-  if (unique.length===0) { log(`トラッシュに${cardType}カードがありません`,"system"); return; }
+  if (unique.length === 0) { log(`トラッシュに条件を満たす${cardType}カードがありません`, "system"); return; }
   let html = `<p style="color:var(--text-dim);margin-bottom:8px;">トラッシュから${cardType}を1枚手札に戻す：</p>`;
   html += `<div class="modal-action-row" style="flex-direction:column;">`;
   for (const cId of unique) {
@@ -7056,7 +8014,10 @@ function openAttackModal(instId) {
     const maxCard = getCard(maxDpInst.cardId);
     html += `<button class="modal-btn warn" onclick="executeAttack('${instId}','digimon','${maxDpInst.instanceId}')">【突進】${maxCard?.name} (DP:${getDP(maxDpInst).toLocaleString()}) を攻撃</button>`;
   } else {
+    // ブロックされない：ブロッカーを無視してプレイヤー直接も選べる
+    const isUnblockable = inst.grantedStatus?.unblockable;
     for (const oppInst of G.oppBattleArea) {
+      // ブロックされない場合、ブロッカーは表示するが強制ではない
       const oc = getCard(oppInst.cardId);
       html += `<button class="modal-btn warn" onclick="executeAttack('${instId}','digimon','${oppInst.instanceId}')">${oc?.name||oppInst.cardId} (DP:${getDP(oppInst).toLocaleString()}${oppInst.isRested?' レスト':''})を攻撃</button>`;
     }
@@ -7330,7 +8291,24 @@ function doSecurityCheck(attacker) {
 // 消滅処理（キーワード優先順位付き）
 // ===================================================
 function destroyDigimon(inst, side) {
+  // 自分側のみ「バトルエリアを離れるとき」効果をチェック
+  if (side === 'my') {
+    const card = getCard(inst.cardId);
+    if (card?._effect_text && /バトルエリアを離れるとき/.test(card._effect_text)) {
+      checkAndFireLeaveEffect(inst, () => _doDestroyDigimon(inst, side));
+      return;
+    }
+  }
+  _doDestroyDigimon(inst, side);
+}
+
+function _doDestroyDigimon(inst, side) {
   const card = getCard(inst.cardId);
+  // 相手の効果で消滅しない（効果消滅の場合のみ）
+  if (side === 'my' && inst.grantedStatus?.immune_opp_effect_destroy) {
+    log(`　→ ${card?.name} は相手の効果で消滅しない！`, 'important');
+    return;
+  }
   log(`💀 ${card?.name||inst.cardId} 消滅（進化元${inst.stack.length}枚もトラッシュへ）`,"attack");
   // セーブキーワードを持つデジモンは消滅時テイマー下に置く（自分側のみ）
   if (side === 'my') {
@@ -8806,6 +9784,261 @@ function doubleBackToTop() {
   document.getElementById('double-input-page').style.display = 'none';
   G_isDoubleMode = false;
   window.location.href = window.location.pathname; // パラメーターを除いてリロード
+}
+
+function executePlayFromTrashFree(cardId, fromHand=false) {
+  closeModal();
+  // トラッシュ or 手札から除去
+  const trashIdx = G.myTrash.lastIndexOf(cardId);
+  const handIdx = G.myHand.indexOf(cardId);
+  if (trashIdx >= 0) {
+    G.myTrash.splice(trashIdx, 1);
+  } else if (fromHand && handIdx >= 0) {
+    G.myHand.splice(handIdx, 1);
+  } else {
+    log('対象カードが見つかりません', 'system'); return;
+  }
+  const inst = newInstance(cardId);
+  inst.usedThisTurn = true;
+  G.myBattleArea.push(inst);
+  const card = getCard(cardId);
+  log(`💫 ${card?.name} をトラッシュからコスト0で登場！`, 'important');
+  G._lastPlayedInst = inst;
+  triggerEffect(inst, '登場時', G.myBattleArea, G.myTrash);
+  render(); checkTurnEnd();
+}
+
+// 手札からコスト0登場の確定
+function executePlayFromHandFree(cardId, handIndex) {
+  closeModal();
+  if (handIndex >= 0) {
+    G.myHand.splice(handIndex, 1);
+  } else {
+    const ti = G.myTrash.lastIndexOf(cardId);
+    if (ti >= 0) G.myTrash.splice(ti, 1);
+  }
+  const inst = newInstance(cardId);
+  inst.usedThisTurn = true;
+  G.myBattleArea.push(inst);
+  const card = getCard(cardId);
+  log(`💫 ${card?.name} を手札からコスト0で登場！`, 'important');
+  G._lastPlayedInst = inst;
+  triggerEffect(inst, '登場時', G.myBattleArea, G.myTrash);
+  render(); checkTurnEnd();
+}
+
+// 相手デジモンをデッキに戻す確定
+function executeBounceOppToDeck(instId, bottom=false) {
+  const inst = G.oppBattleArea.find(i=>i.instanceId===instId);
+  if (!inst) { closeModal(); return; }
+  const c = getCard(inst.cardId);
+  // 進化元も全てトラッシュ
+  for (const srcId of (inst.stack||[])) G.oppTrash.push(srcId);
+  if (bottom) {
+    G.oppDeck.unshift(inst.cardId);
+  } else {
+    G.oppDeck.push(inst.cardId);
+  }
+  G.oppBattleArea = G.oppBattleArea.filter(i=>i.instanceId!==instId);
+  log(`　→ 相手の${c?.name}をデッキの${bottom?'下':'上'}に戻しました`,'important');
+  closeModal(); syncOppStateToGD(); render();
+}
+
+// 相手のアクティブ不可確定
+function executePreventActivate(instId) {
+  const inst = G.oppBattleArea.find(i=>i.instanceId===instId);
+  if (inst) {
+    if (!inst.grantedStatus) inst.grantedStatus = {};
+    inst.grantedStatus['cannot_activate'] = 'until_opp_turn_end';
+    log(`　→ 相手の${getCard(inst.cardId)?.name}はアクティブにならない`,'system');
+  }
+  closeModal(); syncOppStateToGD(); render();
+}
+
+// 相手へのキーワード付与確定
+function executeGrantKwOpp(instId, kwsJson) {
+  const inst = G.oppBattleArea.find(i=>i.instanceId===instId);
+  if (inst) {
+    if (!inst.grantedStatus) inst.grantedStatus = {};
+    let kws = [];
+    try { kws = JSON.parse(kwsJson.replace(/'/g,'"')); } catch(e) {}
+    for (const kw of kws) inst.grantedStatus[kw] = 'until_opp_turn_end';
+    log(`　→ 相手の${getCard(inst.cardId)?.name}に${kws.join('、')}を付与`,'important');
+  }
+  closeModal(); syncOppStateToGD(); render();
+}
+
+// 進化元下に置く確定
+function selectPlaceUnderSource(handIndex) {
+  const cardId = G.myHand[handIndex];
+  const inst = G._placeUnderSourceInst;
+  if (!inst || !cardId) { closeModal(); return; }
+  // ターゲットのデジモンを選択（バトルエリアが複数なら選択）
+  if (G.myBattleArea.length===1) {
+    executePlaceUnderSource(cardId, handIndex, G.myBattleArea[0].instanceId);
+  } else {
+    let html = `<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
+    for (const i of G.myBattleArea) {
+      html += `<button class="modal-btn primary" onclick="executePlaceUnderSource('${cardId}',${handIndex},'${i.instanceId}')">
+        ${getCard(i.cardId)?.name}</button>`;
+    }
+    html += `</div>`;
+    openModal('どのデジモンの進化元に？', html);
+  }
+}
+
+function executePlaceUnderSource(cardId, handIndex, targetInstId) {
+  const inst = G.myBattleArea.find(i=>i.instanceId===targetInstId);
+  if (!inst) { closeModal(); return; }
+  G.myHand.splice(handIndex, 1);
+  inst.stack.unshift(cardId); // 進化元の下（先頭）に追加
+  log(`　→ ${getCard(cardId)?.name} を ${getCard(inst.cardId)?.name} の進化元の下に置きました`,'important');
+  closeModal(); G._placeUnderSourceInst = null;
+  render();
+}
+
+// セキュリティの上に置く確定
+function executePlaceOnSecurityTop(cardId, handIndex) {
+  G.myHand.splice(handIndex, 1);
+  G.mySecurity.push(cardId); // pushで末尾=上
+  log(`　→ ${getCard(cardId)?.name} をセキュリティの上に置きました`,'important');
+  closeModal(); render();
+}
+
+// 相手を手札に戻す確定
+function executeBounceOppToHand(instId) {
+  const inst = G.oppBattleArea.find(i=>i.instanceId===instId);
+  if (!inst) { closeModal(); return; }
+  for (const srcId of (inst.stack||[])) G.oppTrash.push(srcId);
+  G.oppHand.push(inst.cardId);
+  G.oppBattleArea = G.oppBattleArea.filter(i=>i.instanceId!==instId);
+  log(`　→ 相手の${getCard(inst.cardId)?.name}を手札に戻しました`,'important');
+  closeModal(); syncOppStateToGD(); render();
+}
+
+// 進化元から登場モーダル
+function openSourcePlayModal(instId, filter) {
+  const inst = G.myBattleArea.find(i=>i.instanceId===instId);
+  if (!inst) { closeModal(); return; }
+  const candidates = (inst.stack||[]).filter(cId=>{
+    const c = getCard(cId);
+    if (!c || c.type!=='デジモン') return false;
+    if (filter.nameContains?.length>0 && !filter.nameContains.some(n=>(c.name||'').includes(n))) return false;
+    if (filter.level !== undefined && c.level !== filter.level) return false;
+    return true;
+  });
+  if (candidates.length===0) { log('進化元に対象カードがありません','system'); closeModal(); return; }
+  if (candidates.length===1) { executePlayFromSource(instId, candidates[0]); return; }
+  let html = `<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
+  for (const cId of candidates) {
+    const c = getCard(cId);
+    html += `<button class="modal-btn primary" onclick="executePlayFromSource('${instId}','${cId}')">
+      ${c?.name} (Lv.${c?.level||'?'})</button>`;
+  }
+  html += `<button class="modal-btn" onclick="closeModal()">スキップ</button></div>`;
+  openModal('進化元から登場', html);
+}
+
+function executePlayFromSource(instId, cardId) {
+  const inst = G.myBattleArea.find(i=>i.instanceId===instId);
+  if (!inst) { closeModal(); return; }
+  const idx = inst.stack.indexOf(cardId);
+  if (idx < 0) { closeModal(); return; }
+  inst.stack.splice(idx, 1);
+  const ni = newInstance(cardId); ni.usedThisTurn = true;
+  G.myBattleArea.push(ni);
+  log(`💫 ${getCard(cardId)?.name} を進化元からコスト0で登場！`,'important');
+  closeModal();
+  triggerEffect(ni,'登場時',G.myBattleArea,G.myTrash);
+  render(); checkTurnEnd();
+}
+
+// テイマーコスト0登場確定
+function executePlayTamerFree(cardId, handIndex) {
+  closeModal();
+  G.myHand.splice(handIndex, 1);
+  const ni = newInstance(cardId); ni.usedThisTurn = true;
+  G.myBattleArea.push(ni);
+  log(`💫 ${getCard(cardId)?.name} をコスト0で登場！`,'important');
+  triggerEffect(ni,'登場時',G.myBattleArea,G.myTrash);
+  render(); checkTurnEnd();
+}
+
+// トラッシュから進化元に加える確定
+function selectTrashToSourceCard(cardId) {
+  const d = G._trashToSourceData;
+  if (!d) { closeModal(); return; }
+  if (d.targets.length===1) {
+    executeTrashToSource(cardId, d.targets[0].instanceId, d.act.bottom);
+  } else {
+    let html = `<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
+    for (const t of d.targets) {
+      html += `<button class="modal-btn primary" onclick="executeTrashToSource('${cardId}','${t.instanceId}',${!!d.act.bottom})">
+        ${getCard(t.cardId)?.name}</button>`;
+    }
+    html += `</div>`;
+    openModal('どのデジモンの進化元に？', html);
+  }
+}
+
+function executeReturnToTamagoDeck(cardId, bottom=false) {
+  const idx = G.myTrash.lastIndexOf(cardId);
+  if (idx >= 0) G.myTrash.splice(idx, 1);
+  if (bottom) G.myTamagoDeck.unshift(cardId); else G.myTamagoDeck.push(cardId);
+  log(`　→ ${getCard(cardId)?.name} をデジタマデッキ${bottom?'の下':''}に戻しました`,'important');
+  closeModal(); render();
+}
+
+function executeTrashToSource(cardId, targetInstId, bottom=false) {
+  const inst = G.myBattleArea.find(i=>i.instanceId===targetInstId);
+  if (!inst) { closeModal(); return; }
+  const idx = G.myTrash.lastIndexOf(cardId);
+  if (idx >= 0) G.myTrash.splice(idx, 1);
+  if (bottom) inst.stack.unshift(cardId);
+  else inst.stack.push(cardId);
+  log(`　→ ${getCard(cardId)?.name} を ${getCard(inst.cardId)?.name} の進化元の${bottom?'下':'上'}に追加`, 'important');
+  closeModal(); G._trashToSourceData = null;
+  render();
+}
+
+// 手札から進化元に加える確定
+function executeHandToSource(cardId, handIndex, targetInstId, bottom=false, top=false) {
+  const inst = G.myBattleArea.find(i=>i.instanceId===targetInstId);
+  if (!inst) { closeModal(); return; }
+  G.myHand.splice(handIndex, 1);
+  if (bottom) inst.stack.unshift(cardId);
+  else inst.stack.push(cardId);
+  log(`　→ ${getCard(cardId)?.name} を ${getCard(inst.cardId)?.name} の進化元の${bottom?'下':'上'}に追加`, 'important');
+  closeModal();
+  render();
+}
+
+// セキュリティ確認後に手札に加える
+function playSecurityCardFree(cardId) {
+  const idx = G.mySecurity.indexOf(cardId);
+  if (idx >= 0) G.mySecurity.splice(idx, 1);
+  G.myHand.push(cardId);
+  log(`　→ ${getCard(cardId)?.name} をセキュリティから手札に加えました`, 'important');
+}
+
+function closeCheckSecurity(doShuffle) {
+  if (doShuffle) {
+    G.mySecurity = G.mySecurity.sort(()=>Math.random()-0.5);
+    log(`　→ セキュリティをシャッフルしました`, 'system');
+  }
+  closeModal(); render();
+}
+
+// 相手テイマー消滅確定
+function executeDestroyOppTamer(instId) {
+  const t = G.oppBattleArea.find(i=>i.instanceId===instId);
+  if (t) {
+    G.oppBattleArea = G.oppBattleArea.filter(i=>i.instanceId!==instId);
+    G.oppTrash.push(t.cardId);
+    log(`💀 相手の${getCard(t.cardId)?.name}を消滅させました`,'important');
+    syncOppStateToGD();
+  }
+  closeModal(); render();
 }
 
 function executeDestroyThenActivate(activateInstId, destroyInstId) {
@@ -11105,6 +12338,113 @@ function confirmPlacedEvoEffect(instId, cardId, blockIndex) {
     log(`　→ 進化時効果を発揮！`,'important');
     resolveStructuredActions(inst, block.actions||[]);
   }
+}
+
+// ===================================================
+// バトルエリアを離れるとき（onLeave）トリガー
+// ===================================================
+
+// バトルエリアを離れるとき効果を持つか確認してモーダルを出す
+// 戻り値: true=離れない処理をユーザーに委ねる、false=そのまま離れる
+function checkAndFireLeaveEffect(inst, onLeave) {
+  const card = getCard(inst.cardId);
+  const effText = card?._effect_text || '';
+  if (!/バトルエリアを離れるとき/.test(effText)) {
+    onLeave(); return; // 効果なし→そのまま離れる
+  }
+
+  // 「バトルエリアを離れるとき、〜」の部分を抽出
+  const leaveM = effText.match(/バトルエリアを離れるとき、([\s\S]+?)(?:\n|$|自分のターン|相手のターン|お互いのターン|【|消滅時|進化時|登場時)/);
+  if (!leaveM) { onLeave(); return; }
+
+  const leaveText = leaveM[1].trim();
+
+  // 「ディレイ」の場合はそのまま離れてディレイ処理
+  if (/^ディレイ/.test(leaveText)) {
+    onLeave();
+    // ディレイ効果を発動
+    const delayContent = leaveText.replace(/^ディレイ[。・\s]*/, '').trim();
+    const delayActions = delayContent ? parseActionsFromText(delayContent) : [];
+    G.delayedEffects.push({ inst, actionText: delayContent, actions: delayActions, label: leaveText.slice(0,20) });
+    log(`⏱ ${card.name} のバトルエリアを離れるとき（ディレイ）を登録`, 'system');
+    return;
+  }
+
+  // 「〜することで、離れない」パターン
+  const stayM = leaveText.match(/^(.+?)ことで、(?:そのデジモン\d*体?は?)?離れない/);
+  if (stayM) {
+    const costText = stayM[1].trim();
+    let html = `<p style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">
+      ${card.name} がバトルエリアを離れようとしています。</p>`;
+    html += `<div class="modal-action-row" style="flex-direction:column;gap:5px;">`;
+    html += `<button class="modal-btn primary" onclick="executeLeaveStay('${inst.instanceId}')">
+      ✅ ${costText} → 離れない</button>`;
+    html += `<button class="modal-btn warn" onclick="executeLeaveGo()">
+      ❌ そのまま離れる</button>`;
+    html += `</div>`;
+    G._leaveData = { inst, onLeave, costText, leaveText };
+    openModal(`バトルエリアを離れるとき`, html);
+    return;
+  }
+
+  // 「離れない」を伴わない効果（手札に戻す・登場させる等）→ 離れた後に効果発動
+  onLeave();
+
+  // 効果を発動
+  const leaveActions = parseActionsFromText(leaveText);
+  if (leaveActions.length > 0) {
+    log(`　→ ${card.name} のバトルエリアを離れるとき効果を発動`, 'system');
+    resolveStructuredActions(inst, leaveActions);
+  }
+}
+
+// 「離れない」を選択してコスト行動を実行
+function executeLeaveStay(instId) {
+  const d = G._leaveData;
+  if (!d) { closeModal(); return; }
+  const inst = G.myBattleArea.find(i=>i.instanceId===instId) || d.inst;
+  const costText = d.costText;
+
+  // 「このデジモンを手札に戻す」→ バトルエリアから除去して手札へ（離れることで離れない）
+  if (/このデジモンを手札に戻す/.test(costText)) {
+    G.myBattleArea = G.myBattleArea.filter(i=>i.instanceId!==instId);
+    // 進化元もトラッシュへ
+    for (const srcId of (inst.stack||[])) G.myTrash.push(srcId);
+    G.myHand.push(inst.cardId);
+    log(`　→ ${getCard(inst.cardId)?.name} を手札に戻しました（バトルエリアを離れない）`, 'important');
+    closeModal(); G._leaveData = null; render(); return;
+  }
+
+  // 「このデジモンをレストさせる」→ レストさせて離れない
+  if (/このデジモンをレストさせる/.test(costText)) {
+    inst.isRested = true;
+    log(`　→ ${getCard(inst.cardId)?.name} をレストさせました（離れない）`, 'important');
+    closeModal(); G._leaveData = null; render(); return;
+  }
+
+  // 「このデジモンを消滅させる」→ 消滅させて離れない（別のデジモンが離れない）
+  if (/このデジモンを消滅させる/.test(costText)) {
+    _doDestroyDigimon(inst, 'my');
+    closeModal(); G._leaveData = null; render(); return;
+  }
+
+  // その他のコスト行動はパーサーに任せる
+  const costActions = parseActionsFromText(costText);
+  log(`　→ コスト行動実行: ${costText}`, 'system');
+  if (costActions.length > 0) resolveStructuredActions(inst, costActions);
+  closeModal();
+  G._leaveData = null;
+  log(`　→ ${getCard(inst.cardId)?.name} はバトルエリアに留まります`, 'important');
+  render();
+}
+
+// 「そのまま離れる」を選択
+function executeLeaveGo() {
+  const d = G._leaveData;
+  if (!d) { closeModal(); return; }
+  closeModal();
+  G._leaveData = null;
+  d.onLeave();
 }
 
 window.onload = function() {
