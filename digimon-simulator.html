@@ -788,7 +788,7 @@ body {
       <button class="mode-btn" onclick="selectMode('double-self')">
         <div class="mode-icon">🎭</div>
         <div class="mode-name">セルフダブル</div>
-        <div class="mode-desc">1人で2デッキを操作<br>（準備中）</div>
+        <div class="mode-desc">1人で2デッキを操作<br>交互に操作</div>
       </button>
       <button class="mode-btn" onclick="selectMode('single-free')">
         <div class="mode-icon">🔓</div>
@@ -798,7 +798,7 @@ body {
       <button class="mode-btn" onclick="selectMode('double-free')">
         <div class="mode-icon">🔓🔓</div>
         <div class="mode-name">フリーダブル</div>
-        <div class="mode-desc">2デッキ・枚数不問<br>（準備中）</div>
+        <div class="mode-desc">2デッキ・枚数不問<br>盤面自由設定</div>
       </button>
     </div>
   </div>
@@ -9324,12 +9324,18 @@ function renderDeckTrash() {
   if(tc) tc.textContent=G.myTrash.length;
 }
 
-function drawCard() {
-  if(!G.isMyTurn){log("自分のターンではありません","system");return;}
-  if(G.myDeck.length===0){log("デッキが空です","system");return;}
-  if(G.phase!=="main"){log("ドローはドローフェイズに行ってください","system");return;}
-  const cId=G.myDeck.pop(); G.myHand.push(cId);
-  log(`[テスト] ${getCard(cId)?.name||cId} をドロー`,"system"); render();
+function drawCard(count=1) {
+  if (!G.isMyTurn) { log("自分のターンではありません","system"); return; }
+  if (G.myDeck.length===0) { log("デッキが空です","system"); return; }
+  // ダブルモードはフェーズチェックなし
+  if (!G_isDoubleMode && G.phase !== 'main') { log("ドローはドローフェイズに行ってください","system"); return; }
+  const actual = Math.min(count, G.myDeck.length);
+  for (let i=0; i<actual; i++) {
+    const cId = G.myDeck.pop();
+    G.myHand.push(cId);
+    log(`📤 ${getCard(cId)?.name||cId} をドロー`,"system");
+  }
+  render();
 }
 
 // ===================================================
