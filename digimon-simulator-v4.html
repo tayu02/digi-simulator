@@ -10135,23 +10135,35 @@ function confirmMulligan(doMulligan) {
 // ===================================================
 function parseDeckURL(url) {
   try {
-    const urlObj = new URL(url);
-    const recipe = urlObj.searchParams.get('recipe')||'';
-    const deckname = decodeURIComponent(urlObj.searchParams.get('deckname')||'デッキ');
-    const comment = decodeURIComponent(urlObj.searchParams.get('comment')||'');
-    if (!recipe) return {deckname,comment,mainDeck:[],tamagoDeck:[],error:null};
+    let recipe = '';
+    let deckname = 'デッキ';
+    let comment = '';
+
+    // URLパースを試みる（decknameが不完全でも失敗しないよう対処）
+    try {
+      const urlObj = new URL(url);
+      recipe = urlObj.searchParams.get('recipe') || '';
+      try { deckname = decodeURIComponent(urlObj.searchParams.get('deckname') || 'デッキ'); } catch(e) { deckname = 'デッキ'; }
+      try { comment = decodeURIComponent(urlObj.searchParams.get('comment') || ''); } catch(e) { comment = ''; }
+    } catch(e) {
+      // URLパース失敗時はregexでrecipeだけ取り出す
+      const m = url.match(/[?&]recipe=([^&]+)/);
+      recipe = m ? m[1] : '';
+    }
+
+    if (!recipe) return {deckname, comment, mainDeck:[], tamagoDeck:[], error:null};
     const cardEntries = recipe.split('_');
     const mainDeck=[], tamagoDeck=[], notFound=[];
     for (const entry of cardEntries) {
       const parsed = parseCardEntry(entry);
-      if (!parsed) { notFound.push(entry); continue; }
+      if (!parsed) { if (entry) notFound.push(entry); continue; }
       const {cardId, count} = parsed;
       const card = getCard(cardId);
       if (!card) { notFound.push(`${entry}(${cardId})`); continue; }
       const target = card.type==='デジタマ' ? tamagoDeck : mainDeck;
       for (let i=0;i<count;i++) target.push(cardId);
     }
-    return {deckname,comment,mainDeck,tamagoDeck,notFound,error:null};
+    return {deckname, comment, mainDeck, tamagoDeck, notFound, error:null};
   } catch(e) { return {error:`URLの解析に失敗しました: ${e.message}`}; }
 }
 
