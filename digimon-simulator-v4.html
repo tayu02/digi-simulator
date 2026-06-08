@@ -10160,11 +10160,17 @@ function parseCardEntry(entry) {
   if (!match) return null;
   const setPrefix = match[1].toUpperCase();
   const numStr = match[2];
-  const count = parseInt(numStr.slice(-1));
-  const cardNum = numStr.slice(0,-1);
-  const cardId = `${setPrefix}-${cardNum}`;
-  if (count<1||count>4) return null;
-  return {cardId,count};
+  const lastDigit = parseInt(numStr.slice(-1));
+  // 末尾0は削除済み（0枚）→スキップ
+  if (lastDigit === 0) return null;
+  // 末尾1-4が枚数
+  if (lastDigit >= 1 && lastDigit <= 4) {
+    const count = lastDigit;
+    const cardNum = numStr.slice(0, -1);
+    if (!cardNum) return null;
+    return { cardId: `${setPrefix}-${cardNum}`, count };
+  }
+  return null;
 }
 
 function loadDeckFromURL(url) {
