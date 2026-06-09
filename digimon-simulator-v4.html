@@ -1052,8 +1052,8 @@ const DURATION_PATTERNS = [
 // =====================================================
 
 // エフェクトをキューに追加して処理を開始
-function enqueueEffect(label, inst, actions, actionText) {
-  G.effectQueue.push({ label, inst, actions: actions||[], actionText: actionText||'' });
+function enqueueEffect(label, inst, actions, actionText, root) {
+  G.effectQueue.push({ label, inst, actions: actions||[], actionText: actionText||'', root: root||null });
   processEffectQueue();
 }
 
@@ -1076,6 +1076,8 @@ function processEffectQueue() {
   try {
     if (effect.actions.length > 0 && effect.actions[0]?.type !== 'unknown') {
       resolveStructuredActions(effect.inst, effect.actions);
+    } else if (effect.root) {
+      executeActionNode(effect.root, effect.inst);
     } else if (effect.actionText) {
       resolveTextAction(effect.inst, effect.actionText, {});
     }
@@ -1112,7 +1114,7 @@ function processEffectQueue() {
 function enqueueSimultaneous(effects) {
   if (effects.length === 0) return;
   if (effects.length === 1) {
-    enqueueEffect(effects[0].label, effects[0].inst, effects[0].actions, effects[0].actionText);
+    enqueueEffect(effects[0].label, effects[0].inst, effects[0].actions, effects[0].actionText, effects[0].root);
     return;
   }
   // 複数ある場合は順番選択モーダルを出す
@@ -2847,7 +2849,7 @@ const ACTION_HANDLERS = {
         if (block.specialTrigger !== 'onSourceTrashed') continue;
         enqueueEffect(`${srcCard.name}【進化元から破棄されたとき】`,
           { cardId: cId, instanceId: `src_${cId}`, stack: [] },
-          block.actions||[], block.actionText);
+          block.actions||[], block.actionText, block.root||null);
       }
     }
     render();
@@ -5930,7 +5932,7 @@ function confirmEvolve(newCardId, handIndex, targetInstId, cost) {
     if (evoEffects.length > 1) {
       enqueueSimultaneous(evoEffects);
     } else if (evoEffects.length === 1) {
-      enqueueEffect(evoEffects[0].label, evoEffects[0].inst, evoEffects[0].actions, evoEffects[0].actionText);
+      enqueueEffect(evoEffects[0].label, evoEffects[0].inst, evoEffects[0].actions, evoEffects[0].actionText, evoEffects[0].root);
     } else {
       // フォールバック（旧来の直接実行）
       try { triggerEffect(targetInst,"進化時",G.myBattleArea,G.myTrash); } catch(e){}
@@ -9294,6 +9296,7 @@ function executeAttack(attackerInstId, targetType, targetInstId) {
       inst: attacker,
       actions: block.actions || [],
       actionText: block.actionText,
+      root: block.root || null,
     });
   }
   // 進化元のアタック時効果（_parsed_evolvedのみ）
@@ -9309,6 +9312,7 @@ function executeAttack(attackerInstId, targetType, targetInstId) {
         inst: attacker,
         actions: block.actions || [],
         actionText: block.actionText,
+        root: block.root || null,
       });
     }
   }
@@ -9326,7 +9330,7 @@ function executeAttack(attackerInstId, targetType, targetInstId) {
       enqueueSimultaneous(atkEffects);
     } else {
       enqueueEffect(atkEffects[0].label, atkEffects[0].inst,
-                    atkEffects[0].actions, atkEffects[0].actionText);
+                    atkEffects[0].actions, atkEffects[0].actionText, atkEffects[0].root);
     }
     // バトル処理をキューの末尾に追加（ブロック判定を経由）
     G.effectQueue.push({
@@ -9449,7 +9453,7 @@ function fireAttackEndEffects(attacker) {
     }
   }
   if (effects.length > 1) enqueueSimultaneous(effects);
-  else if (effects.length === 1) enqueueEffect(effects[0].label, effects[0].inst, effects[0].actions, effects[0].actionText);
+  else if (effects.length === 1) enqueueEffect(effects[0].label, effects[0].inst, effects[0].actions, effects[0].actionText, effects[0].root);
 }
 
 // アタック時効果完了後のバトル実行
@@ -9726,7 +9730,7 @@ function _doDestroyDigimon(inst, side) {
       enqueueSimultaneous(destroyEffects);
     } else if (destroyEffects.length === 1) {
       enqueueEffect(destroyEffects[0].label, destroyEffects[0].inst,
-                    destroyEffects[0].actions, destroyEffects[0].actionText);
+                    destroyEffects[0].actions, destroyEffects[0].actionText, destroyEffects[0].root);
     }
   } else {
     G.oppBattleArea = G.oppBattleArea.filter(i=>i.instanceId!==inst.instanceId);
@@ -10147,6 +10151,9 @@ function parseDeckURL(url) {
       try { comment = decodeURIComponent(urlObj.searchParams.get('comment') || ''); } catch(e) { comment = ''; }
     } catch(e) {
       // URLパース失敗時はregexでrecipeだけ取り出す
+    }
+    // recipeがまだ空ならregexで取り出す（new URL()が成功してもrecipeが取れない場合の保険）
+    if (!recipe) {
       const m = url.match(/[?&]recipe=([^&]+)/);
       recipe = m ? m[1] : '';
     }
@@ -10811,7 +10818,7 @@ function executeEvolveFromHand(targetInstId, newCardId, handIndex, cost) {
   collectSpecialTriggerEffects('onMyDigimonEvolved', targetInst, card.name)
     .forEach(e=>evoEffects.push(e));
   if (evoEffects.length > 1) enqueueSimultaneous(evoEffects);
-  else if (evoEffects.length === 1) enqueueEffect(evoEffects[0].label, evoEffects[0].inst, evoEffects[0].actions, evoEffects[0].actionText);
+  else if (evoEffects.length === 1) enqueueEffect(evoEffects[0].label, evoEffects[0].inst, evoEffects[0].actions, evoEffects[0].actionText, evoEffects[0].root);
   render(); checkTurnEnd();
 }
 
@@ -10856,7 +10863,7 @@ function executeEvolveFromTrash(targetInstId, newCardId, cost) {
   collectSpecialTriggerEffects('onMyDigimonEvolvedFromTrash', targetInst, card.name)
     .forEach(e => evoEffects.push(e));
   if (evoEffects.length > 1) enqueueSimultaneous(evoEffects);
-  else if (evoEffects.length === 1) enqueueEffect(evoEffects[0].label, evoEffects[0].inst, evoEffects[0].actions, evoEffects[0].actionText);
+  else if (evoEffects.length === 1) enqueueEffect(evoEffects[0].label, evoEffects[0].inst, evoEffects[0].actions, evoEffects[0].actionText, evoEffects[0].root);
   G._lastEvoFromTrash = false;  // フラグをリセット
   render(); checkTurnEnd();
 }
@@ -11394,7 +11401,7 @@ function executeStayByDestroy(stayInstId, destroyInstId) {
 function fireOtherDigimonDestroyed() {
   const effects = collectSpecialTriggerEffects('onOtherDigimonDestroyed');
   if (effects.length > 1) enqueueSimultaneous(effects);
-  else if (effects.length === 1) enqueueEffect(effects[0].label, effects[0].inst, effects[0].actions, effects[0].actionText);
+  else if (effects.length === 1) enqueueEffect(effects[0].label, effects[0].inst, effects[0].actions, effects[0].actionText, effects[0].root);
 }
 
 // トラッシュからN枚選んでデッキ上に戻すモーダル（コスト行動・複数選択）
@@ -13314,7 +13321,7 @@ function confirmJogress() {
   G.lastEvolvedInstId = instA.instanceId;
   triggerEffect(instA,'進化時',G.myBattleArea,G.myTrash);
   collectSpecialTriggerEffects('onMyDigimonEvolved', instA, newCard.name)
-    .forEach(e=>enqueueEffect(e.label,e.inst,e.actions,e.actionText));
+    .forEach(e=>enqueueEffect(e.label,e.inst,e.actions,e.actionText,e.root));
   render(); checkTurnEnd();
 }
 
