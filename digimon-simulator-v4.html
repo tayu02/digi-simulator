@@ -9790,7 +9790,11 @@ function endMyTurn() {
     }
   }
   updatePhaseButtons(); renderMemory(); render();
-  setTimeout(()=>doOpponentTurn(), 800);
+  if (G_isDoubleMode) {
+    setTimeout(()=>doubleEndTurn(), 800);
+  } else {
+    setTimeout(()=>doOpponentTurn(), 800);
+  }
 }
 
 function doOpponentTurn() {
@@ -11092,7 +11096,8 @@ function confirmDoubleMulligan(side, doMulligan) {
   } else {
     // ゲーム開始
     G = GD.left;
-    G.memory = GD.memory;
+    G.memory = -GD.memory; // 負数=自分側（赤先行）
+    G.isMyTurn = true;
     G.oppBattleArea = GD.right.myBattleArea;
     G.oppSecurity   = GD.right.mySecurity;
     G.oppTrash      = GD.right.myTrash;
@@ -12084,6 +12089,8 @@ function openModal(title, content) {
 }
 function closeModal() {
   document.getElementById("modal-overlay").classList.remove("open");
+  // モーダルを閉じたらキューのロックを解除
+  G.effectQueueRunning = false;
   // エフェクトキューに残りがあれば次を処理（ターン終了より優先）
   if (G.effectQueue && G.effectQueue.length > 0) {
     setTimeout(processEffectQueue, 150);
@@ -12315,10 +12322,10 @@ function deepCopyG() {
 
 // ダブルモード：ターン終了
 function doubleEndTurn() {
-  // 現在プレイヤーのGを保存
+  // 現在プレイヤーのGを保存（G.memoryを絶対値でGD.memoryに保存）
   const prev = GD.activePlayer;
+  GD.memory = Math.abs(G.memory); // 渡ったメモリーを絶対値で記録
   GD[prev] = deepCopyG();
-  GD[prev].memory = GD.memory;
 
   // 次のプレイヤーに切り替え
   const next = prev === 'left' ? 'right' : 'left';
@@ -12329,19 +12336,21 @@ function doubleEndTurn() {
   G = GD[next];
   G.isMyTurn = true;
 
-  // メモリー処理：GD.memoryは常に絶対値、activePlayerで向きを判定
-  const nextMem = GD.memory === 0 ? 3 : GD.memory;
-  G.memory = nextMem; // Gのmemoryも絶対値
-  GD.memory = nextMem;
+  // メモリー処理：
+  // G.memory > 0 = 相手側にある = 自分はターン終了条件になってしまう
+  // → 次プレイヤーから見て「自分側のメモリー」にするため負数にする
+  const absVal = GD.memory === 0 ? 3 : GD.memory;
+  G.memory = -absVal; // 負数 = 自分側（自分が使える）
+  GD.memory = absVal;
 
   // 相手側情報をopp〜に設定（効果処理で参照できるように）
   const oppState = GD[prev];
-  G.oppBattleArea = oppState.myBattleArea;
-  G.oppSecurity   = oppState.mySecurity;
-  G.oppTrash      = oppState.myTrash;
-  G.oppHand       = oppState.myHand;
-  G.oppBreeding   = oppState.myBreeding;
-  G.oppDeck       = oppState.myDeck;
+  G.oppBattleArea = oppState.myBattleArea || [];
+  G.oppSecurity   = oppState.mySecurity   || [];
+  G.oppTrash      = oppState.myTrash      || [];
+  G.oppHand       = oppState.myHand       || [];
+  G.oppBreeding   = oppState.myBreeding   || null;
+  G.oppDeck       = oppState.myDeck       || [];
 
   renderDouble();
   renderDoubleStatus();
@@ -13063,7 +13072,8 @@ function freeDoubleStart() {
   GD.memory = FD.startMemory;
 
   G = GD.left;
-  G.memory = GD.memory;
+  G.memory = -GD.memory; // 負数=自分側（赤が先行で自分のメモリーを持つ）
+  G.isMyTurn = true;
   G.oppBattleArea = GD.right.myBattleArea;
   G.oppSecurity   = GD.right.mySecurity;
   G.oppTrash      = GD.right.myTrash;
@@ -15059,6 +15069,9 @@ function confirmOptionalAction() {
   // optional:falseとして実行（既に確認済み）
   dispatchAction(p.node, p.inst);
   if (p.node.then) executeActionNode(p.node.then, p.inst);
+  G.effectQueueRunning = false;
+  render();
+  setTimeout(processEffectQueue, 100);
 }
 
 // skipOptionalAction
@@ -15067,8 +15080,10 @@ function skipOptionalAction() {
   const p = G._pendingOptionalNode;
   G._pendingOptionalNode = null;
   closeModal();
-  // スキップ → ターン1回は消費しない
-  // if_notがあれば実行しない（「できる」を使わなかった場合その後も発動しない）
+  // スキップ → if_notがあれば実行しない
+  G.effectQueueRunning = false;
+  render();
+  setTimeout(processEffectQueue, 100);
 }
 
 // evaluateInheritedEffects
