@@ -1166,8 +1166,14 @@ function openSimultaneousModal(effects) {
   html += `<div class="modal-action-row" style="flex-direction:column;gap:4px;">`;
   for (let i = 0; i < effects.length; i++) {
     const e = effects[i];
-    html += `<button class="modal-btn primary" onclick="selectSimultaneousOrder(${i})">
-      <strong>${e.label}</strong>
+    // 効果内容の概要（ラベルに含まれていなければactionTextから補う）
+    let summary = '';
+    if (e.actionText && !String(e.label).includes(String(e.actionText).slice(0, 10))) {
+      const txt = String(e.actionText);
+      summary = `<br><small style="color:var(--text-dim);font-weight:400;">${txt.slice(0, 44)}${txt.length > 44 ? '…' : ''}</small>`;
+    }
+    html += `<button class="modal-btn primary" style="text-align:left;line-height:1.4;" onclick="selectSimultaneousOrder(${i})">
+      <strong>${e.label}</strong>${summary}
     </button>`;
   }
   html += `</div>`;
@@ -2412,6 +2418,45 @@ const ACTION_HANDLERS = {
   },
 
   // トラッシュからN枚デッキ上に戻すことで（コスト行動）
+  // 進化条件を無視して進化（テイマーレストコスト付き：BT19-088アイ＆マコト等）
+  "ignore_cond_evolve": (inst, act) => {
+    const baseName = act.baseName, targetName = act.targetName;
+    const cost = act.cost || 0;
+    const sources = act.sources || ['手札','トラッシュ'];
+    if (!canAfford(cost)) { log(`コスト不足のため進化できません（進化コスト${cost}）`, 'system'); return; }
+    if (act.restSelf) {
+      const tc = getCard(inst?.cardId);
+      if (!inst || tc?.type !== 'テイマー') { log('コストにするテイマーがいません', 'system'); return; }
+      if (inst.isRested) { log(`${tc.name} は既にレスト状態です（コストを支払えません）`, 'system'); return; }
+    }
+    // 進化元候補：バトルエリアの名称一致デジモン
+    const bases = G.myBattleArea.filter(i => {
+      const c = getCard(i.cardId);
+      return c?.type === 'デジモン' && cardNameMatches(c.name||'', baseName);
+    });
+    if (bases.length === 0) { log(`バトルエリアに「${baseName}」がいません`, 'system'); return; }
+    // 進化先候補：手札/トラッシュの名称一致カード
+    const targets = [];
+    if (sources.includes('手札')) {
+      G.myHand.forEach((cId) => {
+        const c = getCard(cId);
+        if (c && cardNameMatches(c.name||'', targetName)) targets.push({ cId, from:'hand' });
+      });
+    }
+    if (sources.includes('トラッシュ')) {
+      for (const cId of [...new Set(G.myTrash)]) {
+        const c = getCard(cId);
+        if (c && cardNameMatches(c.name||'', targetName)) targets.push({ cId, from:'trash' });
+      }
+    }
+    if (targets.length === 0) { log(`${sources.join('/')}に「${targetName}」がありません`, 'system'); return; }
+    G._ignoreEvoPending = {
+      instId: inst?.instanceId || null, restSelf: !!act.restSelf, cost,
+      bases, targets, baseId: bases[0].instanceId,
+    };
+    openIgnoreEvolveModal();
+  },
+
   "trash_to_deck_top_as_cost": (inst, act) => {
     const count = act.count || 2;
     const f = act.filter || {};
@@ -2423,11 +2468,12 @@ const ACTION_HANDLERS = {
       if (f.nameContains && !(c.name||'').includes(f.nameContains)) return false;
       return true;
     };
-    const candidates = [...new Set(G.myTrash)].filter(isEligible);
-    if (candidates.length < count) {
-      log(`トラッシュに対象カードが${count}枚ありません（${candidates.length}枚）`, 'system'); return;
+    const eligibleAll = G.myTrash.filter(isEligible);
+    if (eligibleAll.length < count) {
+      log(`トラッシュに対象カードが${count}枚ありません（${eligibleAll.length}枚）`, 'system'); return;
     }
-    // 複数選択モーダル
+    const candidates = [...new Set(eligibleAll)];
+    // selectedは枚数つき（同名カードを複数枚選べるようにする）
     G._trashDeckTopPending = { inst, count, candidates, selected:[], afterActions: act.afterActions||[] };
     openTrashToDeckTopModal2();
   },
@@ -4142,13 +4188,22 @@ const ACTION_HANDLERS = {
       const c = getCard(cId);
       if (!c) return false;
       if (!filter || Object.keys(filter).length === 0) return true;
-      if (filter.type && !filter.type.split('/').includes(c.type) && c.type !== filter.type) return false;
-      if (filter.color && !(c.color||[]).some(col => filter.color.includes(col))) return false;
+      // ※ extractFilter（colors/costMax/nameContains/cardType等）と
+      // 　 旧形式（color/maxCost/nameList/type）の両キー体系を受け付ける
+      const fType = filter.type || filter.cardType;
+      if (fType && !String(fType).split('/').includes(c.type) && c.type !== fType) return false;
+      if (filter.excludeType && c.type === filter.excludeType) return false;
+      const fColors = filter.color || filter.colors;
+      if (fColors?.length > 0 && !(c.color||[]).some(col => fColors.includes(col))) return false;
+      if (filter.level !== undefined && c.level !== filter.level) return false;
       if (filter.minLevel && (c.level||0) < filter.minLevel) return false;
       if (filter.maxLevel && (c.level||0) > filter.maxLevel) return false;
       if (filter.features?.length > 0 && !filter.features.some(f => (c.features||[]).includes(f))) return false;
-      if (filter.nameList?.length > 0 && !filter.nameList.some(n => cardNameMatches(c.name||'', n))) return false;
-      if (filter.maxCost != null && (c.cost||0) > filter.maxCost) return false;
+      const fNames = filter.nameList || filter.nameContains;
+      if (fNames?.length > 0 && !fNames.some(n => cardNameMatches(c.name||'', n))) return false;
+      const fMaxCost = filter.maxCost != null ? filter.maxCost : filter.costMax;
+      if (fMaxCost != null && (c.cost||0) > fMaxCost) return false;
+      if (filter.textContains?.length > 0 && !filter.textContains.some(t => cardTextAll(c).includes(t))) return false;
       return true;
     });
     if (eligible.length === 0) {
@@ -4431,7 +4486,16 @@ const ACTION_HANDLERS = {
 
   // コストN以下の相手デジモンを消滅
   "destroy_opp_cost_under": (inst, act) => {
-    const maxCost = act.maxCost || 0;
+    let maxCost = act.maxCost || 0;
+    // 「自分のトラッシュN枚ごとに、この効果の登場コスト上限+M」のスケール適用
+    if (act.scaleUnit && act.scalePlus) {
+      const zoneLen = (act.scaleZone === 'trash' || !act.scaleZone) ? G.myTrash.length : 0;
+      const bonus = Math.floor(zoneLen / act.scaleUnit) * act.scalePlus;
+      if (bonus > 0) {
+        maxCost += bonus;
+        log(`　→ トラッシュ${zoneLen}枚：消滅対象の登場コスト上限+${bonus}（上限${maxCost}）`, 'system');
+      }
+    }
     const targets = G.oppBattleArea.filter(i => (getCard(i.cardId)?.cost||0) <= maxCost);
     _destroyOppWithSelection(inst, targets, act.count || 1, `登場コスト${maxCost}以下の相手のデジモンを消滅`);
   },
@@ -5242,7 +5306,7 @@ function renderMemory() {
     if (mem>0 && v>0 && v<=mem) cell.classList.add("blue-filled");
     if (mem<0 && v<0 && v>=mem) cell.classList.add("red-filled");
     if (v===mem) cell.classList.add("active-marker");
-    if (Math.abs(v)%5===0||v===0) cell.textContent = Math.abs(v);
+    if ((window.FILM&&FILM.on)||Math.abs(v)%5===0||v===0) cell.textContent = Math.abs(v);
     track.appendChild(cell);
   }
   const vd = document.getElementById("memory-value-display");
@@ -5399,6 +5463,9 @@ function updatePhaseButtons() {
   if (lbl) lbl.textContent = phaseNames[G.phase]||G.phase;
   const badge=document.getElementById("turn-player-badge");
   if (badge) { badge.textContent=G.isMyTurn?"自分のターン":"相手のターン"; badge.className=G.isMyTurn?"my-turn":"opp-turn"; }
+  // ターン数ラベル（従来は初期値「ターン 1」のまま更新されていなかった）
+  const tcl=document.getElementById("turn-count-label");
+  if (tcl) tcl.textContent=`ターン ${G.turn||1}`;
   // 相手ターン中のカウンターブラスト進化ボタン
   const blastBtn = document.getElementById('btn-blast-evo');
   if (blastBtn) {
@@ -5910,6 +5977,11 @@ function canEvolveOnto(newCard, targetInst) {
     while ((specM = specPat.exec(newCard._effect_text)) !== null) {
       const condText = specM[1].trim();
       const cost = parseInt(specM[2]);
+      // ゾーン枚数条件（「自分のトラッシュがN枚以上の間」等）を先に判定
+      const trashCondM = condText.match(/自分のトラッシュが(\d+)枚以上/);
+      if (trashCondM && G.myTrash.length < parseInt(trashCondM[1])) continue;
+      const secCondM = condText.match(/自分のセキュリティが(\d+)枚以下/);
+      if (secCondM && G.mySecurity.length > parseInt(secCondM[1])) continue;
       // 名称条件を抽出
       const targetNames = [...condText.matchAll(/「([^」]+)」/g)].map(m => m[1]);
       if (targetNames.length === 0) continue;
@@ -6023,6 +6095,12 @@ function canEvolveOntoAll(newCard, targetInst) {
 
       for (const part of condParts) {
         const p = part.trim();
+        // ゾーン枚数条件（「自分のトラッシュがN枚以上の間」等）は
+        // 名称・特徴マッチより先に判定する（後に置くと名称一致時に素通りする）
+        const trashCondM2 = condText.match(/自分のトラッシュが(\d+)枚以上/);
+        if (trashCondM2 && G.myTrash.length < parseInt(trashCondM2[1])) continue;
+        const secCondM2 = condText.match(/自分のセキュリティが(\d+)枚以下/);
+        if (secCondM2 && G.mySecurity.length > parseInt(secCondM2[1])) continue;
         // Lv条件
         const lvM = p.match(/Lv\.(\d+)/);
         const requiredLv = lvM ? parseInt(lvM[1]) : null;
@@ -6057,9 +6135,6 @@ function canEvolveOntoAll(newCard, targetInst) {
             matched = true; matchedType = '特殊色'; break;
           }
         }
-        // トラッシュ枚数条件（「自分のトラッシュがN枚以上の間」）
-        const trashCondM2 = p.match(/自分のトラッシュが(\d+)枚以上/);
-        if (trashCondM2 && G.myTrash.length < parseInt(trashCondM2[1])) continue;
         // Lvのみ条件
         if (allNames.length===0 && features.length===0 && !descName && !multiColorM && requiredLv!==null) {
           matched = true; matchedType = 'Lv'; break;
@@ -6145,38 +6220,8 @@ function confirmEvolve(newCardId, handIndex, targetInstId, cost) {
   // ===== ⑥進化時効果を発火 =====
   render();
   if (!inBreeding) {
-    // 進化時効果を収集してキューに積む（同時誘発対応）
-    const evoEffects = [];
-    // 進化時トリガー（このデジモン自身の効果）
-    if (targetInst) {
-      const card2 = getCard(targetInst.cardId);
-      const blocks2 = card2?._parsed_effects || [];
-      for (const block of blocks2) {
-        if (!block.triggers.includes('進化時')) continue;
-        evoEffects.push({
-          label: `${card2.name}【進化時】`,
-          inst: targetInst,
-          actions: block.actions || [],
-          actionText: block.actionText,
-          root: block.root || null,
-        });
-      }
-    }
-    // onMyDigimonEvolved（テイマー等）
-    collectSpecialTriggerEffects('onMyDigimonEvolved', targetInst, newCard.name)
-      .forEach(e => evoEffects.push(e));
-    // onSpecificDigimonEvolved（名称指定進化・トラッシュ含む）
-    collectSpecialTriggerEffects('onSpecificDigimonEvolved', targetInst, newCard.name)
-      .forEach(e => evoEffects.push(e));
-
-    if (evoEffects.length > 1) {
-      enqueueSimultaneous(evoEffects);
-    } else if (evoEffects.length === 1) {
-      enqueueEffect(evoEffects[0].label, evoEffects[0].inst, evoEffects[0].actions, evoEffects[0].actionText, evoEffects[0].root);
-    } else {
-      // フォールバック（旧来の直接実行）
-      try { triggerEffect(targetInst,"進化時",G.myBattleArea,G.myTrash); } catch(e){}
-    }
+    // 進化時効果を収集してキューに積む（同時誘発対応・ラベルに効果概要を含む）
+    fireEvolveTriggersFor(targetInst);
   } else {
     log("　（育成エリアのため【進化時】効果は発動しません）","system");
   }
@@ -8541,6 +8586,21 @@ function resolveTextAction(inst, actionText, parsed) {
   if (delayM) {
     const delayContent = delayM ? delayM[1].replace(/^[・\s]+/, '').trim() : '';
     ACTION_HANDLERS["delay"](inst, { actionText: delayContent, label: delayContent.slice(0, 20) });
+    return;
+  }
+
+  // 「（このテイマーをレストさせることで、）自分の「X」を手札/トラッシュの「Y」に
+  //  進化条件を無視して進化コストNで進化できる」（先にここで処理しないと
+  //  下のテイマーレスト処理が候補確認前にレストさせてしまう）
+  const igEvoM = t.match(/(このテイマーをレストさせることで、)?自分の「([^」]+)」\d*体?を(手札\/トラッシュ|トラッシュ\/手札|手札|トラッシュ)の「([^」]+)」に進化条件を無視して進化コスト(\d+)で進化できる/);
+  if (igEvoM) {
+    ACTION_HANDLERS["ignore_cond_evolve"](inst, {
+      restSelf: !!igEvoM[1],
+      baseName: igEvoM[2],
+      sources: igEvoM[3].split('/'),
+      targetName: igEvoM[4],
+      cost: parseInt(igEvoM[5]),
+    });
     return;
   }
 
@@ -11716,6 +11776,112 @@ function fireOtherDigimonDestroyed() {
 }
 
 // トラッシュからN枚選んでデッキ上に戻すモーダル（コスト行動・複数選択）
+// 進化条件を無視して進化：選択モーダル
+function openIgnoreEvolveModal() {
+  const p = G._ignoreEvoPending;
+  if (!p) return;
+  let html = `<p style="color:var(--text-dim);font-size:11px;margin-bottom:8px;">
+    進化条件を無視して進化します（進化コスト${p.cost}${p.restSelf?'・このテイマーをレスト':''}）</p>`;
+  if (p.bases.length > 1) {
+    html += `<p style="font-size:11px;color:var(--text);margin-bottom:4px;">進化させるデジモン：</p>`;
+    html += `<div class="modal-action-row" style="flex-direction:column;gap:3px;margin-bottom:8px;">`;
+    for (const b of p.bases) {
+      const c = getCard(b.cardId);
+      const sel = p.baseId === b.instanceId;
+      html += `<button class="modal-btn ${sel?'warn':''}" onclick="selectIgnoreEvoBase('${b.instanceId}')">
+        ${sel?'✓ ':''}${c?.name}（Lv.${c?.level||'?'} / DP${(getDP(b)||0).toLocaleString()}）</button>`;
+    }
+    html += `</div>`;
+  }
+  html += `<p style="font-size:11px;color:var(--text);margin-bottom:4px;">進化先：</p>`;
+  html += `<div class="modal-action-row" style="flex-direction:column;gap:3px;">`;
+  for (const t of p.targets) {
+    const c = getCard(t.cId);
+    html += `<button class="modal-btn primary" onclick="executeIgnoreEvolve('${t.cId}','${t.from}')">
+      【${t.from==='hand'?'手札':'トラッシュ'}】${c?.name}（Lv.${c?.level||'?'}）</button>`;
+  }
+  html += `<button class="modal-btn" onclick="G._ignoreEvoPending=null;closeModal()">スキップ（進化しない）</button></div>`;
+  openModal('進化条件を無視して進化', html);
+}
+
+function selectIgnoreEvoBase(instId) {
+  if (G._ignoreEvoPending) G._ignoreEvoPending.baseId = instId;
+  openIgnoreEvolveModal();
+}
+
+function executeIgnoreEvolve(cId, from) {
+  const p = G._ignoreEvoPending;
+  if (!p) { closeModal(); return; }
+  const base = G.myBattleArea.find(i => i.instanceId === p.baseId);
+  if (!base) { G._ignoreEvoPending = null; closeModal(); return; }
+  if (!canAfford(p.cost)) { log(`コスト不足！進化コスト: ${p.cost}`, 'system'); return; }
+  // レストコスト支払い
+  if (p.restSelf && p.instId) {
+    const tamer = G.myBattleArea.find(i => i.instanceId === p.instId);
+    if (!tamer || tamer.isRested) { log('テイマーをレストできないため進化できません', 'system'); G._ignoreEvoPending = null; closeModal(); return; }
+    tamer.isRested = true;
+    log(`　→ ${getCard(tamer.cardId)?.name} をレストさせました（コスト）`, 'system');
+  }
+  // 進化先カードを手札/トラッシュから取り除く
+  if (from === 'hand') {
+    const i = G.myHand.indexOf(cId);
+    if (i < 0) { log('手札にカードがありません', 'system'); G._ignoreEvoPending = null; closeModal(); return; }
+    G.myHand.splice(i, 1);
+  } else {
+    const i = G.myTrash.lastIndexOf(cId);
+    if (i < 0) { log('トラッシュにカードがありません', 'system'); G._ignoreEvoPending = null; closeModal(); return; }
+    G.myTrash.splice(i, 1);
+  }
+  G._ignoreEvoPending = null;
+  closeModal();
+  // 進化処理
+  base.stack.push(base.cardId);
+  base.cardId = cId;
+  base.tempKeywords = []; base.tempDP = 0;
+  G.lastEvolvedInstId = base.instanceId;
+  const nc = getCard(cId);
+  log(`⬆ ${nc?.name} (Lv.${nc?.level||'?'}) に進化条件を無視して進化！（コスト${p.cost}）`, 'evolve');
+  spendMemory(p.cost);
+  // 進化時ドロー（ルール上、効果による進化でも1ドロー）
+  if (G.myDeck.length > 0) {
+    const dId = G.myDeck.pop();
+    G.myHand.push(dId);
+    log(`　→ 進化時ドロー: ${getCard(dId)?.name}`, 'system');
+  }
+  render();
+  // 進化時効果を発火（同時誘発対応・confirmEvolveと同一方式）
+  fireEvolveTriggersFor(base);
+  render(); checkTurnEnd();
+}
+
+// 進化時トリガーの収集＋キュー積み（confirmEvolveの⑥と同一ロジックの共通版）
+function fireEvolveTriggersFor(targetInst) {
+  const newCard = getCard(targetInst.cardId);
+  const evoEffects = [];
+  const blocks2 = newCard?._parsed_effects || [];
+  for (const block of blocks2) {
+    if (!block.triggers.includes('進化時')) continue;
+    evoEffects.push({
+      label: `${newCard.name}【進化時】${block.actionText?`：${block.actionText.slice(0,28)}${block.actionText.length>28?'…':''}`:''}`,
+      inst: targetInst,
+      actions: block.actions || [],
+      actionText: block.actionText,
+      root: block.root || null,
+    });
+  }
+  collectSpecialTriggerEffects('onMyDigimonEvolved', targetInst, newCard?.name||'')
+    .forEach(e => evoEffects.push(e));
+  collectSpecialTriggerEffects('onSpecificDigimonEvolved', targetInst, newCard?.name||'')
+    .forEach(e => evoEffects.push(e));
+  if (evoEffects.length > 1) {
+    enqueueSimultaneous(evoEffects);
+  } else if (evoEffects.length === 1) {
+    enqueueEffect(evoEffects[0].label, evoEffects[0].inst, evoEffects[0].actions, evoEffects[0].actionText, evoEffects[0].root);
+  } else {
+    try { triggerEffect(targetInst, "進化時", G.myBattleArea, G.myTrash); } catch(e){}
+  }
+}
+
 function openTrashToDeckTopModal2() {
   const p = G._trashDeckTopPending;
   if (!p) return;
@@ -11725,10 +11891,11 @@ function openTrashToDeckTopModal2() {
   html += `<div class="modal-action-row" style="flex-direction:column;gap:3px;">`;
   for (const cId of p.candidates) {
     const c = getCard(cId);
-    const sel = p.selected.includes(cId);
-    html += `<button class="modal-btn ${sel?'warn':'primary'}"
+    const have = G.myTrash.filter(x=>x===cId).length;
+    const sel = p.selected.filter(x=>x===cId).length;
+    html += `<button class="modal-btn ${sel>0?'warn':'primary'}"
       onclick="toggleTrashDeckTop('${cId}')">
-      ${sel?'✓ ':''}${c?.name} (${c?.type} コスト${c?.cost||'?'})
+      ${sel>0?`✓${sel} `:''}${c?.name} (${c?.type} コスト${c?.cost||'?'})${have>1?` ×${have}枚`:''}
     </button>`;
   }
   const canConfirm = p.selected.length >= p.count;
@@ -11741,10 +11908,12 @@ function openTrashToDeckTopModal2() {
 function toggleTrashDeckTop(cardId) {
   const p = G._trashDeckTopPending;
   if (!p) return;
-  if (p.selected.includes(cardId)) {
-    p.selected = p.selected.filter(c=>c!==cardId);
-  } else if (p.selected.length < p.count) {
-    p.selected.push(cardId);
+  const have = G.myTrash.filter(x=>x===cardId).length;
+  const sel = p.selected.filter(x=>x===cardId).length;
+  if (p.selected.length < p.count && sel < have) {
+    p.selected.push(cardId);          // 1枚追加（同名カードも枚数分まで選べる）
+  } else {
+    p.selected = p.selected.filter(c=>c!==cardId);  // 上限なら選択解除
   }
   openTrashToDeckTopModal2();
 }
@@ -12121,10 +12290,12 @@ function render() {
     syncOppStateToGD();
     renderDouble();
     renderMemory();
+    if (window.FILM) FILM.update();  // 撮影モード：テロップ等の更新
     return;
   }
   renderBattleArea(); renderHand(); renderBreeding(); renderSecurity(); renderDeckTrash();
   FX.battleDiff();  // 演出：バトルエリアに増えたカードを「手札/育成→場」で飛ばす
+  if (window.FILM) FILM.update();  // 撮影モード：テロップ等の更新
   const tc=document.getElementById("tamago-count");
   if(tc) tc.textContent=`${G.myTamagoDeck.length}枚`;
   const dn=document.getElementById("deck-name-label");
@@ -12169,7 +12340,10 @@ function renderHand() {
     if(card.type==="テイマー")innerHTML+=`<div class="card-type-badge badge-tamer">テイマー</div>`;
     if(card.type==="オプション")innerHTML+=`<div class="card-type-badge badge-option">OP</div>`;
     const onclick = selActive && isHighlight ? `onSelectionTap('${cId}')` : selActive ? '' : `playCardFromHand(${i})`;
-    row.insertAdjacentHTML("beforeend",`<div class="card-mini ${colorClass} hand-card" onclick="${onclick}" title="${card.name}" style="${dimmed}${highlight}">${innerHTML}</div>`);
+    // 撮影モード：実カード画像を差し込む
+    const filmImg=(window.FILM&&FILM.on)?FILM.imgTag(cId):"";
+    const filmCls=filmImg?" film-imged":"";
+    row.insertAdjacentHTML("beforeend",`<div class="card-mini ${colorClass} hand-card${filmCls}" data-film-card="${cId}" onclick="${onclick}" title="${card.name}" style="${dimmed}${highlight}">${filmImg}${innerHTML}</div>`);
   }
   // 選択中はキャンセルボタンを表示
   if (selActive) {
@@ -12186,7 +12360,10 @@ function renderBreeding() {
   const inst=G.myBreeding, card=getCard(inst.cardId);
   const colors=card?.color||[];
   const colorClass=getColorClass(colors);
-  slot.innerHTML=`<div class="card-mini ${colorClass}" style="width:52px;" onclick="openBreedingMenu()"><div class="card-name">${card?.name||inst.cardId}</div><div class="card-lv">Lv.${card?.level||'—'}</div>${card?.dp?`<div class="card-dp">${card.dp.toLocaleString()}</div>`:''}${inst.stack.length>0?`<div class="card-lv">進化元${inst.stack.length}枚</div>`:''}</div>`;
+  // 撮影モード：実カード画像を差し込む
+  const filmImg=(window.FILM&&FILM.on&&card)?FILM.imgTag(card.id):"";
+  const filmCls=filmImg?" film-imged":"";
+  slot.innerHTML=`<div class="card-mini ${colorClass}${filmCls}" data-film-card="${inst.cardId}" style="width:52px;" onclick="openBreedingMenu()">${filmImg}<div class="card-name">${card?.name||inst.cardId}</div><div class="card-lv">Lv.${card?.level||'—'}</div>${card?.dp?`<div class="card-dp">${card.dp.toLocaleString()}</div>`:''}${inst.stack.length>0?`<div class="card-lv">進化元${inst.stack.length}枚</div>`:''}</div>`;
 }
 
 function renderSecurity() {
@@ -12254,7 +12431,10 @@ function buildCardMiniHTML(inst, options={}) {
   const kws=[...(card.keywords||[]).map(k=>k.name),...inst.tempKeywords];
   if(kws.length>0)innerHTML+=`<div style="margin-top:2px;">${kws.map(k=>`<span class="keyword-badge">${k}</span>`).join('')}</div>`;
   const onclick=options.onclick||"";
-  return `<div class="card-slot"><div ${idAttr} class="card-mini ${colorClass}${restClass}${selClass}" onclick="${onclick}" title="${card.name}${stackLen>0?' (進化元'+stackLen+'枚)':''}">${innerHTML}</div>${stackLen>0?`<div class="stack-count">進化元${stackLen}枚</div>`:''}</div>`;
+  // 撮影モード：実カード画像を差し込む（画像が無い/読めない場合は従来表示のまま）
+  const filmImg=(window.FILM&&FILM.on)?FILM.imgTag(card.id):"";
+  const filmCls=filmImg?" film-imged":"";
+  return `<div class="card-slot"><div ${idAttr} class="card-mini ${colorClass}${restClass}${selClass}${filmCls}" data-film-card="${card.id}" onclick="${onclick}" style="${options.extraStyle||''}" title="${card.name}${stackLen>0?' (進化元'+stackLen+'枚)':''}">${filmImg}${innerHTML}</div>${stackLen>0?`<div class="stack-count">進化元${stackLen}枚</div>`:''}</div>`;
 }
 
 function buildCardDetailHTML(card) {
@@ -12384,7 +12564,20 @@ function openCardDetailModal(inst) {
     for(const srcId of inst.stack){const src=getCard(srcId);if(!src)continue;html+=`<div class="evo-source-card"><span style="color:var(--text)">${src.name}</span><span style="color:var(--text-dim)">Lv.${src.level||'—'} / ${src.type||''}</span>${src.dp?`<span style="color:var(--accent-yellow)">${src.dp.toLocaleString()}</span>`:''}</div>`;}
     html+=`</div>`;
   }
-  html+=`<div class="modal-action-row"><button class="modal-btn" onclick="closeModal()">閉じる</button></div>`;
+  html+=`<div class="modal-action-row" style="flex-direction:column;gap:5px;">`;
+  // メイン効果の手動発動（テイマー・レスト中デジモン等もここから発動できる）
+  if (G.isMyTurn && G.phase==="main") {
+    const blocks = card?._parsed_effects?.length > 0
+      ? card._parsed_effects
+      : splitAndParseEffects(card?._effect_text||'');
+    for (let bi = 0; bi < blocks.length; bi++) {
+      const b = blocks[bi];
+      if (!b.triggers?.includes('メイン') && !b.triggers?.includes('お互いのターン')) continue;
+      const summary = (b.actionText||'効果発動').slice(0,26);
+      html+=`<button class="modal-btn primary" onclick="closeModal();doubleFireBlock('${inst.instanceId}',${bi})">✨ メイン効果: ${summary}…</button>`;
+    }
+  }
+  html+=`<button class="modal-btn" onclick="closeModal()">閉じる</button></div>`;
   openModal(card?.name||inst.cardId, html);
 }
 
@@ -12751,6 +12944,7 @@ function renderDouble() {
   renderDoubleSide('left',  leftState);
   renderDoubleSide('right', rightState);
   renderDoubleStatus();
+  if (window.FILM) FILM.update();  // 撮影モード：テロップ等の更新
 }
 
 function renderDoubleSide(side, state) {
@@ -12838,8 +13032,11 @@ function renderDoubleSide(side, state) {
       const c = getCard(inst.cardId);
       const dp = getDP(inst);
       const div = document.createElement('div');
-      div.className = `double-digimon-card${inst.isRested?' rested':''}${isActive?' active-card':''}`;
-      div.innerHTML = `<div class="dcard-name">${c?.name||'?'}</div>
+      // 撮影モード：実カード画像を差し込む
+      const filmImg = (window.FILM&&FILM.on) ? FILM.imgTag(inst.cardId) : '';
+      div.className = `double-digimon-card${inst.isRested?' rested':''}${isActive?' active-card':''}${filmImg?' film-imged':''}`;
+      div.setAttribute('data-film-card', inst.cardId);
+      div.innerHTML = `${filmImg}<div class="dcard-name">${c?.name||'?'}</div>
         <div class="dcard-dp" style="color:${color}">DP ${dp.toLocaleString()}</div>
         <div class="dcard-lv">Lv.${c?.level||'?'} / ${(inst.stack||[]).length}枚</div>
         ${G_isFreeDouble ? `
@@ -12861,8 +13058,11 @@ function renderDoubleSide(side, state) {
       const cId = state.myHand[i];
       const c = getCard(cId);
       const div = document.createElement('div');
-      div.className = `double-hand-card${isActive?' active-card':''}`;
-      div.innerHTML = `<div class="hcard-name">${c?.name||'?'}</div>
+      // 撮影モード：実カード画像を差し込む
+      const filmImg = (window.FILM&&FILM.on) ? FILM.imgTag(cId) : '';
+      div.className = `double-hand-card${isActive?' active-card':''}${filmImg?' film-imged':''}`;
+      div.setAttribute('data-film-card', cId);
+      div.innerHTML = `${filmImg}<div class="hcard-name">${c?.name||'?'}</div>
         <div class="hcard-cost" style="color:${color}">コスト${c?.cost??'?'}</div>`;
       if (isActive) div.onclick = () => openDoubleHandCardModal(cId, i, state);
       else if (G_isFreeDouble) div.onclick = () => openFdInactiveHandModal(side, i);
@@ -12877,14 +13077,23 @@ function openDoubleHandCardModal(cardId, handIndex, state) {
   if (!card) return;
   let html = buildCardDetailHTML(card);
   html += `<div class="modal-action-row" style="flex-direction:column;gap:6px;">`;
-  // 登場
-  if (card.type === 'デジモン' && canAfford(card.cost||0)) {
+  // 登場（デジモン・テイマー。両面カードは選択式）
+  if ((card.type === 'デジモン' || card.type === 'テイマー') && canAfford(card.cost||0)) {
     html += `<button class="modal-btn warn" onclick="doublePlayFromHand('${cardId}',${handIndex})">
       登場（コスト${card.cost||0}）</button>`;
   }
-  // 進化先候補
+  if (card.type === 'デジモン/オプション') {
+    if (canAfford(card.cost||0)) {
+      html += `<button class="modal-btn warn" onclick="closeModal();confirmPlayAsDigimon('${cardId}',${handIndex})">
+        デジモンとして登場（コスト${card.cost||0}）</button>`;
+      html += `<button class="modal-btn warn" onclick="closeModal();confirmPlayAsOption('${cardId}',${handIndex})">
+        オプションとして使用（コスト${card.cost||0}）</button>`;
+    }
+  }
+  // 進化先候補（バトルエリアに加えて育成エリアも見る）
   const evoCandidates = G.myBattleArea.filter(inst=>canEvolveOntoAll(card,inst).length>0);
-  if (evoCandidates.length > 0) {
+  const breedingEvoOk = G.myBreeding && canEvolveOntoAll(card, G.myBreeding).length > 0;
+  if (evoCandidates.length > 0 || breedingEvoOk) {
     html += `<button class="modal-btn primary" onclick="closeModal();openEvolutionSelect('${cardId}',${handIndex})">
       進化する</button>`;
   }
@@ -13017,8 +13226,9 @@ function openDoubleBreedingEffectModal() {
     : splitAndParseEffects(card?._effect_text||'');
   if (blocks.length===0) { log('効果がありません','system'); return; }
   let html = `<div class="modal-action-row" style="flex-direction:column;gap:5px;">`;
-  for (const block of blocks) {
-    html += `<button class="modal-btn primary" onclick="closeModal();doubleFireBlock('${inst.instanceId}',${JSON.stringify(block.actions||[]).replace(/"/g,"'")})">
+  for (let bi = 0; bi < blocks.length; bi++) {
+    const block = blocks[bi];
+    html += `<button class="modal-btn primary" onclick="closeModal();doubleFireBlock('${inst.instanceId}',${bi})">
       ${block.actionText?.slice(0,30)||'効果発動'}</button>`;
   }
   html += `<button class="modal-btn" onclick="closeModal()">キャンセル</button></div>`;
@@ -13029,13 +13239,14 @@ function openBreedingEvoSelect() {
   // 育成エリアのデジモンに対して手札から進化先を選ぶ
   if (!G.myBreeding) return;
   const candidates = G.myHand.map((cId,idx)=>({cId,idx}))
-    .filter(({cId})=>canEvolveOnto(getCard(cId), G.myBreeding).length>0);
+    .filter(({cId})=>canEvolveOntoAll(getCard(cId), G.myBreeding).length>0);
   if (candidates.length===0) { log('進化できるカードが手札にありません','system'); return; }
   let html = `<div class="modal-action-row" style="flex-direction:column;gap:5px;">`;
   for (const {cId,idx} of candidates) {
     const c = getCard(cId);
-    const cost = Math.min(...canEvolveOnto(c,G.myBreeding).map(r=>r.evo.cost));
-    html += `<button class="modal-btn primary" onclick="confirmEvolve('${cId}',${idx},'breeding',${cost})">
+    const allRes = canEvolveOntoAll(c, G.myBreeding);
+    const cost = Math.max(0, Math.min(...allRes.map(r=>r.evo.cost)) - (G.evoDiscount||0));
+    html += `<button class="modal-btn primary" onclick="confirmEvolve('${cId}',${idx},'${G.myBreeding.instanceId}',${cost})">
       ${c?.name}（コスト${cost}）</button>`;
   }
   html += `<button class="modal-btn" onclick="closeModal()">キャンセル</button></div>`;
@@ -13061,23 +13272,47 @@ function openDoubleEffectModal(instId) {
   const blocks = card?._parsed_effects?.length > 0
     ? card._parsed_effects
     : splitAndParseEffects(card?._effect_text||'');
-  const mainBlocks = blocks.filter(b=>b.triggers.includes('メイン')||b.triggers.includes('お互いのターン'));
-  if (mainBlocks.length===0) { log('手動発動できる効果がありません','system'); return; }
+  const mainIdx = [];
+  for (let bi = 0; bi < blocks.length; bi++) {
+    if (blocks[bi].triggers.includes('メイン')||blocks[bi].triggers.includes('お互いのターン')) mainIdx.push(bi);
+  }
+  if (mainIdx.length===0) { log('手動発動できる効果がありません','system'); return; }
   let html = `<div class="modal-action-row" style="flex-direction:column;gap:5px;">`;
-  for (const block of mainBlocks) {
-    html += `<button class="modal-btn primary" onclick="closeModal();doubleFireBlock('${instId}',${JSON.stringify(block.actions||[]).replace(/"/g,"'")})">
+  for (const bi of mainIdx) {
+    const block = blocks[bi];
+    html += `<button class="modal-btn primary" onclick="closeModal();doubleFireBlock('${instId}',${bi})">
       ${block.actionText?.slice(0,30)||'効果発動'}</button>`;
   }
   html += `<button class="modal-btn" onclick="closeModal()">キャンセル</button></div>`;
   openModal(`${card?.name} の効果`, html);
 }
 
-function doubleFireBlock(instId, actionsJson) {
-  const inst = G.myBattleArea.find(i=>i.instanceId===instId);
+// ブロック番号指定で効果を発動する（root→actions→テキストの優先順で実行）
+// ※ 旧実装はactionsをJSON文字列で埋め込んでいたため、rootチェーンが脱落して
+// 　 条件付き効果（アイ＆マコト等）がダブルモードで一切動かなかった
+function doubleFireBlock(instId, blockIndex) {
+  const inst = G.myBattleArea.find(i=>i.instanceId===instId)
+            || (G.myBreeding?.instanceId===instId ? G.myBreeding : null);
   if (!inst) return;
-  let actions = [];
-  try { actions = JSON.parse(actionsJson.replace(/'/g,'"')); } catch(e) {}
-  resolveStructuredActions(inst, actions);
+  const card = getCard(inst.cardId);
+  const blocks = card?._parsed_effects?.length > 0
+    ? card._parsed_effects
+    : splitAndParseEffects(card?._effect_text||'');
+  const block = blocks[blockIndex];
+  if (!block) return;
+  log(`✨ 効果発動: ${card?.name}：${(block.actionText||'').slice(0,30)}`, 'evolve');
+  try {
+    if (block.actions && block.actions.length > 0 && block.actions[0]?.type !== 'unknown') {
+      resolveStructuredActions(inst, block.actions);
+    } else if (block.root && rootHasKnownAction(block.root)) {
+      executeActionNode(block.root, inst);
+    } else if (block.actionText) {
+      resolveTextAction(inst, block.actionText, block);
+    } else if (block.root) {
+      executeActionNode(block.root, inst);
+    }
+  } catch(e) { log(`効果エラー: ${e.message}`, 'system'); }
+  render();
 }
 
 // ダブルモード：進化元を見るモーダル
@@ -13099,10 +13334,15 @@ function openDoubleStackModal(instId) {
 }
 
 
-// ダブルモード：手札から登場
+// ダブルモード：手札から登場（デジモン・テイマー対応）
 function doublePlayFromHand(cardId, handIndex) {
   closeModal();
-  confirmPlayDigimon(cardId, handIndex, undefined);
+  const card = getCard(cardId);
+  if (card?.type === 'テイマー') {
+    confirmPlayTamer(cardId, handIndex);
+  } else {
+    confirmPlayDigimon(cardId, handIndex, undefined);
+  }
 }
 
 // ===================================================
@@ -14571,6 +14811,50 @@ function extractDuration(sentence) {
 function extractActionType(sentence) {
   let m;
 
+  // 「自分のトラッシュから、〜N枚をデッキの上に戻すことで、〜」コスト行動
+  // （EX10-074等。コスト部を捨てると効果がコストなしで実行されてしまう）
+  m = sentence.match(/自分のトラッシュから、(.{0,40}?)(\d+)枚をデッキの(?:1番)?上に戻すことで、(.+)$/);
+  if (m) {
+    const filterText = m[1].trim();
+    const count = parseInt(m[2]);
+    const afterText = m[3].trim();
+    const featureM = filterText.match(/特徴(?:に)?「([^」]+)」を持つ/);
+    const nameM = filterText.match(/名称(?:に)?「([^」]+)」を含む/);
+    const excludeTypeM = filterText.match(/デジタマカード以外/);
+    let afterActions = parseActionsFromText(afterText).filter(a=>a && a.type !== 'unknown');
+    if (afterActions.length === 0) {
+      const dvM = afterText.match(/相手のデジモン\d*体?を?退化(\d+)/);
+      if (dvM) afterActions = [{ type:'devolve', count: parseInt(dvM[1]) }];
+    }
+    return { action:'trash_to_deck_top_as_cost', params:{
+      count,
+      filter: {
+        features: featureM ? [featureM[1]] : null,
+        nameContains: nameM ? nameM[1] : null,
+        excludeType: excludeTypeM ? 'デジタマ' : null,
+      },
+      afterActions,
+    } };
+  }
+
+  // 「自分のトラッシュN枚ごとに、この効果の登場コスト上限+M」
+  // （直前のdestroy_opp_cost_underへbuildActionChainで畳み込む）
+  m = sentence.match(/自分のトラッシュ(\d+)枚ごとに、この効果の(?:登場)?コスト上限[+＋](\d+)/);
+  if (m) return { action:'prev_cost_limit_boost', params:{ unit:parseInt(m[1]), plus:parseInt(m[2]), zone:'trash' } };
+
+  // 「（このテイマーをレストさせることで、）自分の「X」N体を手札/トラッシュの「Y」に
+  //  進化条件を無視して進化コストNで進化できる」（BT19-088アイ＆マコト等）
+  m = sentence.match(/(このテイマーをレストさせることで、)?自分の「([^」]+)」\d*体?を(手札\/トラッシュ|トラッシュ\/手札|手札|トラッシュ)の「([^」]+)」に進化条件を無視して進化コスト(\d+)で進化できる/);
+  if (m) {
+    return { action:'ignore_cond_evolve', params:{
+      restSelf: !!m[1],
+      baseName: m[2],
+      sources: m[3].split('/'),
+      targetName: m[4],
+      cost: parseInt(m[5]),
+    } };
+  }
+
   // ドロー
   m = sentence.match(/(\d+)(?:枚)?ドロー/) || sentence.match(/1ドロー/);
   if (m) return { action:'draw', params:{ count:parseInt(m[1]||'1') } };
@@ -15427,6 +15711,17 @@ function extractFilter(sentence) {
   if (m) filter.maxLevel = parseInt(m[1]);
   m = sentence.match(/Lv\.(\d+)以上/);
   if (m) filter.minLevel = parseInt(m[1]);
+  // Lv一致（「Lv.4の」等。以下/以上が付かない場合）
+  m = sentence.match(/Lv\.(\d+)(?!\d|以下|以上)/);
+  if (m && filter.maxLevel === undefined && filter.minLevel === undefined) {
+    filter.level = parseInt(m[1]);
+  }
+  // カード種類（「デジモンカード」「テイマーカード」等。「〜以外」は除外条件）
+  m = sentence.match(/(デジモン|テイマー|オプション|デジタマ)カード(以外)?/);
+  if (m) {
+    if (m[2]) filter.excludeType = m[1];
+    else filter.cardType = m[1];
+  }
   m = sentence.match(/(?:登場|使用)?コスト(\d+)以下/);
   if (m) filter.costMax = parseInt(m[1]);
   m = sentence.match(/([赤青緑黄黒紫白]+)の/);
@@ -15502,6 +15797,22 @@ function buildActionChain(sentences) {
 
   if (!nodes.length) return null;
 
+  // 「この効果の登場コスト上限+N」を直前のdestroy_opp_cost_underへ畳み込む
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    if (nodes[i].action !== 'prev_cost_limit_boost') continue;
+    for (let j = i - 1; j >= 0; j--) {
+      if (nodes[j].action === 'destroy_opp_cost_under') {
+        nodes[j].params = nodes[j].params || {};
+        nodes[j].params.scaleUnit = nodes[i].params.unit;
+        nodes[j].params.scalePlus = nodes[i].params.plus;
+        nodes[j].params.scaleZone = nodes[i].params.zone || 'trash';
+        break;
+      }
+    }
+    nodes.splice(i, 1);  // 畳み込み後はノード自体を除去（unknown実行を防ぐ）
+  }
+  if (!nodes.length) return null;
+
   // チェーンを構築
   for (let i = 0; i < nodes.length - 1; i++) {
     const cur = nodes[i];
@@ -15518,6 +15829,10 @@ function buildActionChain(sentences) {
 // 効果テキスト全体をパース
 function parseEffectText(text) {
   if (!text) return [];
+  // 特殊進化ヘッダーを除去してから分割する
+  // （除去しないと「自分のトラッシュが20枚以上の間、」等の進化条件が
+  // 　最初の効果ブロックの実行条件としてリークする：EX10-074で実害）
+  text = text.replace(SPECIAL_EVO_REGEX, '').trim();
   const blocks = splitEffectBlocks(text);
   return blocks.map(block => {
     const sentences = splitSentences(block.body);
@@ -15767,6 +16082,8 @@ function evaluateInheritedEffects() {
 function getActionLabel(node) {
   const { action, params } = node;
   const labels = {
+    ignore_cond_evolve: `「${params?.baseName||''}」を「${params?.targetName||''}」に進化条件を無視して進化（コスト${params?.cost??'?'}）`,
+    trash_to_deck_top_as_cost: `トラッシュから${params?.count||2}枚をデッキの上に戻すことで効果発動`,
     draw: `${params?.count||1}ドロー`,
     memory_gain: `メモリー+${params?.value}`,
     rest_opp: '相手1体をレスト',
@@ -16154,6 +16471,204 @@ function pmInit() {
 }
 
 // ===================================================
+// 撮影モード（FILM）
+// ===================================================
+// YouTube等の動画撮影向けに盤面を「見せる」表示へ切り替えるモード。
+// ・入口：「🎥 撮影」ボタン（シングル/ダブル両ヘッダー）・F2キー・URL末尾 ?film=1
+// ・ON中の機能：
+//    「Nターン目」テロップ（左上・赤縁取り）／画面下コメントテロップ（クリック or Cキーで編集、
+//    「|」で改行、空欄で消去）／カードを実画像で表示（cards.jsonのimage_url・読めない場合は
+//    従来のテキストカードに自動フォールバック）／カードの右クリック or 長押しで大型プレビュー
+//    （Escまたはクリックで閉じる）／メモリーゲージ・各種枚数の大型化／
+//    操作UI（フェイズボタン等）はマウス静止2.5秒で自動フェード（マウスを動かすと復帰）
+// ・OFF時は一切動作しない（既存挙動に影響なし）。FXやプレマと同じ追加型設計。
+var FILM = {
+  on: false,
+  caption: '',
+  _idleTimer: null,
+  _lpTimer: null,
+  IDLE_MS: 2500,
+
+  imgUrl(cardId) {
+    const c = (typeof getCard === 'function') ? getCard(cardId) : null;
+    return (c && c.img) ? c.img : '';
+  },
+  // 盤面カードに差し込む<img>タグ。読み込み失敗時はfilm-imgedを外して従来表示へ戻す
+  imgTag(cardId) {
+    const u = this.imgUrl(cardId);
+    if (!u) return '';
+    return `<img class="film-card-img" src="${u}" loading="lazy" referrerpolicy="no-referrer" draggable="false"` +
+      ` onerror="const p=this.closest('.film-imged');if(p)p.classList.remove('film-imged');this.remove()">`;
+  },
+
+  toggle() { this.set(!this.on); },
+  set(v) {
+    this.on = !!v;
+    document.body.classList.toggle('film-mode', this.on);
+    document.querySelectorAll('.film-toggle-btn').forEach(b => {
+      b.textContent = this.on ? '🎥 撮影中' : '🎥 撮影';
+      b.classList.toggle('film-active', this.on);
+    });
+    if (this.on) { this._ensureOverlays(); this._wake(); }
+    else { document.body.classList.remove('film-idle'); this.hideZoom(); }
+    // カード画像の差し込み有無が変わるため盤面を再描画（ゲーム未開始時は各renderが自前でスキップ）
+    try { if (typeof render === 'function') render(); } catch (e) {}
+    this.update();
+  },
+
+  _ensureOverlays() {
+    if (!document.getElementById('film-turn-telop')) {
+      const t = document.createElement('div');
+      t.id = 'film-turn-telop';
+      document.body.appendChild(t);
+    }
+    if (!document.getElementById('film-caption')) {
+      const c = document.createElement('div');
+      c.id = 'film-caption';
+      c.title = 'クリックでテロップ編集（Cキーでも可・「|」で改行）';
+      c.onclick = () => FILM.editCaption();
+      document.body.appendChild(c);
+    }
+    if (!document.getElementById('film-zoom')) {
+      const z = document.createElement('div');
+      z.id = 'film-zoom';
+      z.onclick = () => FILM.hideZoom();
+      z.innerHTML = '<img id="film-zoom-img" referrerpolicy="no-referrer" draggable="false">';
+      document.body.appendChild(z);
+    }
+  },
+
+  editCaption() {
+    if (!this.on) return;
+    const v = prompt('画面下テロップ（「|」で改行・空欄で消去）', this.caption);
+    if (v === null) return;
+    this.caption = v.trim();
+    this.update();
+  },
+
+  // カード大型プレビュー（右クリック/長押しから）
+  showZoom(cardId) {
+    if (!this.on) return;
+    this._ensureOverlays();
+    const z = document.getElementById('film-zoom');
+    const img = document.getElementById('film-zoom-img');
+    if (!z || !img) return;
+    z.querySelector('.film-zoom-text')?.remove();
+    const u = this.imgUrl(cardId);
+    if (u) {
+      img.src = u;
+      img.style.display = '';
+    } else {
+      img.style.display = 'none';
+      const c = (typeof getCard === 'function') ? getCard(cardId) : null;
+      const d = document.createElement('div');
+      d.className = 'film-zoom-text';
+      d.textContent = c ? `${c.name}（画像なし）` : '画像なし';
+      z.appendChild(d);
+    }
+    z.classList.add('show');
+  },
+  hideZoom() { document.getElementById('film-zoom')?.classList.remove('show'); },
+
+  // テロップ類の更新（render/renderDoubleの末尾から呼ばれる）
+  update() {
+    if (!this.on) return;
+    this._ensureOverlays();
+    const telop = document.getElementById('film-turn-telop');
+    const cap = document.getElementById('film-caption');
+    const appEl = document.getElementById('app');
+    const dblEl = document.getElementById('double-app');
+    const inSingle = !!appEl && appEl.style.display !== 'none' && !G_isDoubleMode;
+    const inDouble = !!dblEl && dblEl.style.display !== 'none' && !!G_isDoubleMode;
+    if (!inSingle && !inDouble) {
+      telop.style.display = 'none';
+      cap.style.display = 'none';
+      return;
+    }
+    // ターンテロップ（ダブルは手番側の色ドット付き）
+    let turn = 1, dot = '';
+    if (inDouble) {
+      turn = (GD && GD.turn) || 1;
+      dot = (GD.activePlayer === 'left')
+        ? '<span class="film-dot film-dot-red"></span>'
+        : '<span class="film-dot film-dot-blue"></span>';
+    } else {
+      turn = (G && G.turn) || 1;
+    }
+    telop.innerHTML = `${dot}${turn}ターン目`;
+    telop.style.display = '';
+    // コメントテロップ（空のときは編集入口のプレースホルダーを薄く表示）
+    if (this.caption) {
+      cap.textContent = this.caption.replace(/\|/g, '\n');
+      cap.classList.remove('film-cap-empty');
+    } else {
+      cap.textContent = '（クリックでテロップ入力）';
+      cap.classList.add('film-cap-empty');
+    }
+    cap.style.display = '';
+  },
+
+  // 操作UIの自動フェード：入力があるたびにタイマーを巻き直す
+  _wake() {
+    document.body.classList.remove('film-idle');
+    clearTimeout(this._idleTimer);
+    this._idleTimer = setTimeout(() => {
+      if (this.on) document.body.classList.add('film-idle');
+    }, this.IDLE_MS);
+  },
+
+  init() {
+    // 切替ボタンを両モードのヘッダーへ設置
+    const mk = () => {
+      const b = document.createElement('button');
+      b.className = 'film-toggle-btn';
+      b.textContent = '🎥 撮影';
+      b.onclick = () => FILM.toggle();
+      return b;
+    };
+    const bar = document.getElementById('turn-indicator');
+    if (bar && !bar.querySelector('.film-toggle-btn')) bar.appendChild(mk());
+    const dh = document.getElementById('double-header-right');
+    if (dh && !dh.querySelector('.film-toggle-btn')) dh.insertBefore(mk(), dh.firstChild);
+
+    // 自動フェードの起床イベント
+    document.addEventListener('mousemove', () => { if (FILM.on) FILM._wake(); }, { passive: true });
+
+    // キー操作（入力欄フォーカス中は無効）
+    document.addEventListener('keydown', (e) => {
+      const tag = ((e.target && e.target.tagName) || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || (e.target && e.target.isContentEditable)) return;
+      if (e.key === 'F2') { e.preventDefault(); FILM.toggle(); }
+      else if (FILM.on && (e.key === 'c' || e.key === 'C')) { FILM.editCaption(); }
+      else if (FILM.on && e.key === 'Escape') { FILM.hideZoom(); }
+    });
+
+    // カードの右クリックで大型プレビュー
+    document.addEventListener('contextmenu', (e) => {
+      if (!FILM.on) return;
+      const el = e.target.closest && e.target.closest('[data-film-card]');
+      if (el) { e.preventDefault(); FILM.showZoom(el.getAttribute('data-film-card')); }
+    });
+    // カードの長押し（タッチ）で大型プレビュー
+    document.addEventListener('touchstart', (e) => {
+      if (!FILM.on) return;
+      FILM._wake();
+      const el = e.target.closest && e.target.closest('[data-film-card]');
+      if (!el) return;
+      clearTimeout(FILM._lpTimer);
+      FILM._lpTimer = setTimeout(() => FILM.showZoom(el.getAttribute('data-film-card')), 550);
+    }, { passive: true });
+    document.addEventListener('touchend', () => clearTimeout(FILM._lpTimer), { passive: true });
+    document.addEventListener('touchmove', () => clearTimeout(FILM._lpTimer), { passive: true });
+
+    // URLパラメータで自動ON
+    try {
+      if (new URLSearchParams(window.location.search).get('film') === '1') this.set(true);
+    } catch (e) {}
+  },
+};
+
+// ===================================================
 // 入場ゲート
 // ===================================================
 // 仕様：何も入力せずエンター → 入場。
@@ -16200,6 +16715,7 @@ window.onload = async function() {
   // 先にカードデータを読み込む（モード起動前に完了させる）
   await loadCardDatabase();
   pmInit();
+  FILM.init();
   if (!gateOk) {
     document.getElementById('gate-page').style.display = 'flex';
     return;
@@ -16357,7 +16873,7 @@ window.onload = async function() {
     <div class="d-memory-wrap">
       <div class="d-memory-track" id="double-memory-track"></div>
     </div>
-    <div style="min-width:100px;display:flex;justify-content:flex-end;">
+    <div id="double-header-right" style="min-width:100px;display:flex;justify-content:flex-end;align-items:center;gap:6px;">
       <button class="d-btn d-btn-end" onclick="doublePass()">パス</button>
     </div>
   </div>
@@ -16370,7 +16886,7 @@ window.onload = async function() {
       <div class="d-player-label d-player-label-red">🔴 赤</div>
       <!-- メインエリア：左列・バトル・右列 -->
       <div class="d-main-area">
-        <!-- 左列：セキュリティ・デジタマ・育成（横並び） -->
+        <!-- 左列：セキュリティ・デジタマ -->
         <div class="d-left-col">
           <div class="d-area-label">SEC</div>
           <div id="double-left-security-area" class="d-security-area"></div>
@@ -16380,15 +16896,15 @@ window.onload = async function() {
               <span class="d-box-count" id="double-left-tamago">5</span>
               <span class="d-box-label">タマゴ</span>
             </div>
-            <div class="d-small-box" id="double-left-breed-box">
-              <span class="d-box-icon">🌱</span>
-              <span class="d-box-count" id="double-left-breed-name">空</span>
-              <span class="d-box-label">育成</span>
-            </div>
           </div>
         </div>
-        <!-- バトルエリア -->
+        <!-- バトルエリア（上段に育成エリア） -->
         <div class="d-battle-section">
+          <div class="d-breed-bar" id="double-left-breed-box">
+            <span class="d-box-icon">🌱</span>
+            <span class="d-breed-bar-label">育成</span>
+            <span class="d-box-count" id="double-left-breed-name">空</span>
+          </div>
           <div class="d-area-label">BATTLE</div>
           <div id="double-left-battle" class="d-battle-area"></div>
         </div>
@@ -16423,7 +16939,7 @@ window.onload = async function() {
       <div class="d-player-label d-player-label-blue">🔵 青</div>
       <!-- メインエリア：左列・バトル・右列 -->
       <div class="d-main-area">
-        <!-- 左列：セキュリティ・デジタマ・育成（横並び） -->
+        <!-- 左列：セキュリティ・デジタマ -->
         <div class="d-left-col">
           <div class="d-area-label">SEC</div>
           <div id="double-right-security-area" class="d-security-area"></div>
@@ -16433,15 +16949,15 @@ window.onload = async function() {
               <span class="d-box-count" id="double-right-tamago">5</span>
               <span class="d-box-label">タマゴ</span>
             </div>
-            <div class="d-small-box" id="double-right-breed-box">
-              <span class="d-box-icon">🌱</span>
-              <span class="d-box-count" id="double-right-breed-name">空</span>
-              <span class="d-box-label">育成</span>
-            </div>
           </div>
         </div>
-        <!-- バトルエリア -->
+        <!-- バトルエリア（上段に育成エリア） -->
         <div class="d-battle-section">
+          <div class="d-breed-bar" id="double-right-breed-box">
+            <span class="d-box-icon">🌱</span>
+            <span class="d-breed-bar-label">育成</span>
+            <span class="d-box-count" id="double-right-breed-name">空</span>
+          </div>
           <div class="d-area-label">BATTLE</div>
           <div id="double-right-battle" class="d-battle-area"></div>
         </div>
@@ -16553,6 +17069,17 @@ window.onload = async function() {
   width:100%;
 }
 .d-tamago-breed-row { display:flex; gap:3px; margin-top:5px; }
+/* 育成エリアバー（バトルエリア上段・横長） */
+.d-breed-bar {
+  display:flex; align-items:center; gap:6px;
+  background:var(--bg-card); border:1px solid rgba(255,255,255,0.12);
+  border-radius:6px; padding:4px 10px; margin-bottom:4px;
+  cursor:pointer; transition:border-color 0.15s;
+  min-height:28px;
+}
+.d-breed-bar:hover { border-color:rgba(255,255,255,0.3); }
+.d-breed-bar .d-box-count { font-size:12px; }
+.d-breed-bar-label { font-size:9px; color:var(--text-dim); letter-spacing:1px; }
 .d-security-card {
   position:absolute;
   width:78px; height:56px; /* 横向き */
@@ -16682,6 +17209,138 @@ window.onload = async function() {
     display:flex; align-items:center; justify-content:center;
     font-size:18px; font-weight:700; color:var(--text-bright); z-index:9999;
   }
+}
+</style>
+
+<style>
+/* ===== 撮影モード（FILM） ===== */
+
+/* 切替ボタン */
+.film-toggle-btn {
+  font-size:9px; padding:2px 8px; border:1px solid rgba(255,255,255,0.2);
+  border-radius:4px; background:rgba(255,255,255,0.06); color:var(--text);
+  cursor:pointer; font-family:var(--font-main); flex-shrink:0;
+}
+.film-toggle-btn.film-active { background:#a01818; color:#fff; border-color:#ff6060; }
+
+/* ログは撮影中は常に非表示 */
+body.film-mode #log-area { display:none !important; }
+
+/* 操作UIの自動フェード（マウス静止2.5秒で消え、動かすと復帰） */
+body.film-mode #phase-bar,
+body.film-mode #turn-indicator,
+body.film-mode .d-header .d-btn,
+body.film-mode #double-turn-label { transition:opacity 0.4s; }
+body.film-mode.film-idle #phase-bar,
+body.film-mode.film-idle #turn-indicator,
+body.film-mode.film-idle .d-header .d-btn,
+body.film-mode.film-idle #double-turn-label { opacity:0; pointer-events:none; }
+
+/* 「Nターン目」テロップ（白文字＋赤縁取り） */
+#film-turn-telop {
+  position:fixed; top:46px; left:16px; z-index:8000; pointer-events:none;
+  font-family:var(--font-main); font-weight:900; font-size:42px; color:#fff;
+  letter-spacing:2px; display:none;
+  text-shadow:
+    3px 3px 0 #c01818, -3px 3px 0 #c01818, 3px -3px 0 #c01818, -3px -3px 0 #c01818,
+    3px 0 0 #c01818, -3px 0 0 #c01818, 0 3px 0 #c01818, 0 -3px 0 #c01818,
+    0 5px 8px rgba(0,0,0,0.5);
+}
+.film-dot {
+  display:inline-block; width:18px; height:18px; border-radius:50%;
+  margin-right:10px; vertical-align:middle; box-shadow:0 0 8px rgba(0,0,0,0.5);
+}
+.film-dot-red  { background:var(--accent-red); }
+.film-dot-blue { background:var(--accent-blue); }
+
+/* 画面下コメントテロップ（白文字＋黒縁取り） */
+#film-caption {
+  position:fixed; left:50%; bottom:26px; transform:translateX(-50%);
+  z-index:8000; max-width:86vw; text-align:center; cursor:pointer;
+  font-family:var(--font-main); font-weight:900; font-size:30px; line-height:1.4;
+  color:#fff; white-space:pre-wrap; user-select:none; display:none;
+  text-shadow:
+    2px 2px 0 #000, -2px 2px 0 #000, 2px -2px 0 #000, -2px -2px 0 #000,
+    2px 0 0 #000, -2px 0 0 #000, 0 2px 0 #000, 0 -2px 0 #000,
+    0 0 12px rgba(0,0,0,0.6);
+}
+#film-caption.film-cap-empty { opacity:0.3; font-size:16px; font-weight:700; }
+body.film-mode.film-idle #film-caption.film-cap-empty { opacity:0; pointer-events:none; }
+
+/* カード大型プレビュー（右クリック/長押し） */
+#film-zoom {
+  position:fixed; top:6vh; right:2vw; z-index:8500; display:none; cursor:pointer;
+  filter:drop-shadow(0 10px 32px rgba(0,0,0,0.75));
+}
+#film-zoom.show { display:block; animation:filmZoomIn 0.18s ease-out; }
+#film-zoom img { height:82vh; max-width:44vw; object-fit:contain; border-radius:12px; display:block; }
+.film-zoom-text {
+  background:rgba(10,16,30,0.95); color:#fff; font-size:20px; font-weight:700;
+  padding:32px; border-radius:12px; border:1px solid rgba(255,255,255,0.2);
+}
+@keyframes filmZoomIn { from { transform:translateX(30px); opacity:0; } to { transform:none; opacity:1; } }
+
+/* 盤面カードの実画像表示（読み込み失敗時はfilm-imgedが外れて従来表示に戻る） */
+.film-card-img { display:none; }
+body.film-mode .film-imged { position:relative; overflow:hidden; padding:0; }
+body.film-mode .film-imged .film-card-img {
+  display:block; position:absolute; inset:0; width:100%; height:100%;
+  object-fit:cover; border-radius:inherit; z-index:1;
+}
+body.film-mode .film-imged > *:not(.film-card-img) { visibility:hidden; }
+/* フリーダブルの即席消滅ボタンは撮影中は非表示（モーダル経由の同機能で代替） */
+body.film-mode .fd-destroy-btn { display:none !important; }
+
+/* カードの大型化（画像が映えるサイズに） */
+body.film-mode .card-mini { width:74px; min-height:104px; }
+body.film-mode .card-mini.film-imged { height:104px; }
+body.film-mode .card-mini.rested { margin:0 16px; }
+body.film-mode #breeding-slot .card-mini { width:74px !important; height:104px; }
+body.film-mode .double-hand-card { width:72px; height:101px; }
+body.film-mode .double-digimon-card.film-imged {
+  width:84px; height:118px; min-width:84px; max-width:84px;
+}
+body.film-mode .double-digimon-card.rested {
+  transform:rotate(90deg); opacity:1; margin:0 18px;
+}
+
+/* 各種枚数の大型表示（白文字＋黒縁取り） */
+body.film-mode .d-box-count,
+body.film-mode .box-count {
+  font-size:20px; font-weight:900; color:#fff;
+  text-shadow:1px 1px 0 #000, -1px 1px 0 #000, 1px -1px 0 #000, -1px -1px 0 #000;
+}
+body.film-mode .security-count { font-size:16px; font-weight:900; }
+
+/* メモリーゲージの大型化（金色風） */
+body.film-mode .d-header { height:56px; background:#05070d; }
+body.film-mode .d-memory-track { gap:3px; }
+body.film-mode .d-mem-cell {
+  width:34px; height:34px; font-size:15px; font-weight:900;
+  background:#181006; color:#e8c060; border:2px solid #8a6a20;
+  box-shadow:inset 0 0 6px rgba(232,192,96,0.25);
+}
+body.film-mode .d-mem-zero { width:40px; height:40px; font-size:17px; }
+body.film-mode .d-mem-cell.active-red {
+  background:var(--accent-red); color:#fff; border-color:#ffb0b0;
+  box-shadow:0 0 14px rgba(255,90,90,0.95);
+}
+body.film-mode .d-mem-cell.active-blue {
+  background:var(--accent-blue); color:#fff; border-color:#a0c8ff;
+  box-shadow:0 0 14px rgba(90,140,255,0.95);
+}
+body.film-mode #memory-track { height:34px; }
+body.film-mode .mem-cell { font-size:13px; font-weight:900; }
+
+/* ダブルモード：撮影中は左右1:1固定で両盤面を見せる（手番側は微発光で示す） */
+body.film-mode .d-panel { flex:1 1 0 !important; }
+body.film-mode .d-panel.is-active {
+  background:rgba(255,255,255,0.02);
+  box-shadow:inset 0 0 60px rgba(255,255,255,0.04);
+}
+body.film-mode .d-security-card {
+  background:linear-gradient(135deg,#10254d,#0a1530);
+  border:2px solid #3a64b8;
 }
 </style>
 </body>
